@@ -1,0 +1,847 @@
+import pretty_midi
+import numpy as np
+import os
+import math
+
+import argparse
+import itertools
+import json
+import logging
+import coloredlogs
+import _pickle as pickle
+
+TRACK_0_RANGE = (21, 108)
+TRACK_1_RANGE = (28, 52)
+TRACK_2_RANGE = (28, 52)
+
+TIME_SIGNATURE_MAX_CHANGE = 1
+TEMPO_MAX_CHANGE = 1
+
+
+MAX_TRACK = 3
+V0=120
+V1=100
+V2=60
+
+def get_args(default='.'):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-i', '--input_folder', default=default, type=str,
+                        help="MIDI file input folder")
+    parser.add_argument('-f', '--file_name', default='', type=str,
+                        help="input MIDI file name")
+    parser.add_argument('-o', '--output_folder',default=default,type=str,
+                        help="MIDI file output folder")
+    parser.add_argument('-w', '--window_size', default=-1, type=int,
+                        help="Tension calculation window size, 1 for a beat, 2 for 2 beat etc., -1 for a downbeat")
+
+
+    parser.add_argument('-t', '--track_num', default=0, type=int,
+                        help="number of tracks used to calculate tension, e.g. 3 means use first 3 tracks, "
+                             "default 0 means use all")
+
+
+    return parser.parse_args()
+
+def walk(folder_name):
+    files = []
+    for p, d, f in os.walk(folder_name):
+        for file in f:
+            endname = file.split('.')[-1].lower()
+            if endname == 'mid' or endname == 'midi':
+                files.append(os.path.join(p, file))
+    return files
+
+
+def remove_drum_track(pm):
+
+    for instrument in pm.instruments:
+        if instrument.is_drum:
+            pm.instruments.remove(instrument)
+    return pm
+
+
+
+def get_beat_time(pm, beat_division=4):
+    beats = pm.get_beats()
+
+    divided_beats = []
+    for i in range(len(beats) - 1):
+        for j in range(beat_division):
+            divided_beats.append((beats[i + 1] - beats[i]) / beat_division * j + beats[i])
+    divided_beats.append(beats[-1])
+
+    beat_indices = []
+    for beat in beats:
+        beat_indices.append(np.argwhere(divided_beats == beat)[0][0])
+
+    down_beats = pm.get_downbeats()
+    down_beat_indices = []
+    for down_beat in down_beats:
+        down_beat_indices.append(np.argwhere(divided_beats == down_beat)[0][0])
+
+    return np.array(divided_beats), np.array(beats), np.array(down_beats), beat_indices, down_beat_indices
+
+
+def piano_roll_to_pretty_midi(piano_roll, fs=100, program=0):
+    '''Convert a Piano Roll array into a PrettyMidi object
+     with a single instrument.
+    Parameters
+    ----------
+    piano_roll : np.ndarray, shape=(128,frames), dtype=int
+        Piano roll of one instrument
+    fs : int
+        Sampling frequency of the columns, i.e. each column is spaced apart
+        by ``1./fs`` seconds.
+    program : int
+        The program number of the instrument.
+    Returns
+    -------
+    midi_object : pretty_midi.PrettyMIDI
+        A pretty_midi.PrettyMIDI class instance describing
+        the piano roll.
+    '''
+    notes, frames = piano_roll.shape
+    pm = pretty_midi.PrettyMIDI()
+    instrument = pretty_midi.Instrument(program=program)
+
+    # pad 1 column of zeros so we can acknowledge inital and ending events
+    piano_roll = np.pad(piano_roll, [(0, 0), (1, 1)], 'constant')
+
+    # use changes in velocities to find note on / note off events
+    velocity_changes = np.nonzero(np.diff(piano_roll).T)
+
+    # keep track on velocities and note on times
+    prev_velocities = np.zeros(notes, dtype=int)
+    note_on_time = np.zeros(notes)
+
+    for time, note in zip(*velocity_changes):
+        # use time + 1 because of padding above
+        velocity = piano_roll[note, time + 1]
+        time = time / fs
+        if velocity > 0:
+            if prev_velocities[note] == 0:
+                note_on_time[note] = time
+                prev_velocities[note] = velocity
+        else:
+            pm_note = pretty_midi.Note(
+                velocity=prev_velocities[note],
+                pitch=note,
+                start=note_on_time[note],
+                end=time)
+            instrument.notes.append(pm_note)
+            prev_velocities[note] = 0
+    pm.instruments.append(instrument)
+    return pm
+
+
+# files = walk('../dataset/lmd/lmd_separated_melody_bass')
+#
+# pm = pretty_midi.PrettyMIDI(files[100])
+
+
+
+def time2durations(note_duration, duration_time_to_name, duration_times):
+
+    duration_index = np.argmin(np.abs(note_duration - duration_times))
+    duration_name = duration_time_to_name[duration_times[duration_index]]
+    if duration_name == 'zero':
+        return []
+
+    duration_elements = duration_name.split('_')
+    return duration_elements
+
+
+def note_to_event_name(note,duration_time_to_name, duration_times):
+    duration_event = time2durations(note.end-note.start, duration_time_to_name, duration_times)
+
+    pitch_event = f'p{note.pitch}'
+
+    return pitch_event, duration_event
+
+
+def bar_notes_to_event(notes, bar_time, next_bar_time, beat_times, duration_time_to_name, duration_times,minimum_difference, grid_division=4,is_grid=True):
+    bar_event_list = []
+    continue_note_dict = {}
+    chord_list = []
+
+    if len(notes) > 0:
+        if is_grid:
+            grid_notes(beat_times, notes,minimum_difference,grid_division=grid_division)
+        rest_to_bar_start = time2durations(notes[0].start - bar_time, duration_time_to_name, duration_times)
+
+    else:
+        rest_to_bar_start = time2durations(next_bar_time - bar_time, duration_time_to_name, duration_times)
+
+    if len(rest_to_bar_start) > 0:
+        bar_event_list.append('rest_e')
+        bar_event_list.extend(rest_to_bar_start)
+
+
+
+    for note in notes:
+
+        if len(chord_list) == 0:
+            chord_list.append(note)
+        else:
+            if math.isclose(note.start,chord_list[-1].start) and math.isclose(note.end,chord_list[-1].end):
+                chord_list.append(note)
+            else:
+                temp_pitch_list = []
+
+
+                # clear previous notes in chord_list
+                for chord_list_note in chord_list:
+                    if chord_list_note.velocity == -1:
+                        temp_pitch_list.append('continue')
+                    if chord_list_note.end > next_bar_time:
+                        continue_note_for_next_bar = pretty_midi.Note(pitch=chord_list_note.pitch,
+                                                                      start=next_bar_time,
+                                                                     end=chord_list_note.end,
+                                                                      velocity=-1)
+                        continue_note_dict[chord_list_note.pitch] = continue_note_for_next_bar
+
+                        note_for_this_bar = pretty_midi.Note(pitch=chord_list_note.pitch,
+                                                             start=chord_list_note.start,
+                                                             end=next_bar_time,
+                                                             velocity=chord_list_note.velocity)
+
+                        pitch_event, duration_event = note_to_event_name(note_for_this_bar,duration_time_to_name, duration_times)
+
+                    else:
+                        pitch_event, duration_event = note_to_event_name(chord_list_note,duration_time_to_name, duration_times)
+
+                    temp_pitch_list.append(pitch_event)
+
+
+                bar_event_list.extend(temp_pitch_list)
+                bar_event_list.extend(duration_event)
+
+                if note.start >= chord_list[-1].end:
+                    # rest relative to previous end
+                    rest_duration = time2durations(note.start - chord_list[-1].end, duration_time_to_name,
+                                                   duration_times)
+                    if len(rest_duration) > 0:
+                        bar_event_list.append('rest_e')
+                        bar_event_list.extend(rest_duration)
+
+                else:
+
+                    # rest relative to previous start
+                    rest_duration = time2durations(note.start - chord_list[-1].start, duration_time_to_name,
+                                                   duration_times)
+                    bar_event_list.append('rest_s')
+                    bar_event_list.extend(rest_duration)
+                chord_list = []
+                chord_list.append(note)
+
+    else:
+        temp_pitch_list = []
+        for chord_list_note in chord_list:
+            if chord_list_note.velocity == -1:
+                temp_pitch_list.append('continue')
+            if chord_list_note.end > next_bar_time:
+                continue_note_for_next_bar = pretty_midi.Note(pitch=chord_list_note.pitch,
+                                                              start=next_bar_time,
+                                                              end=chord_list_note.end,
+                                                              velocity=-1)
+
+                continue_note_dict[chord_list_note.pitch] = continue_note_for_next_bar
+
+                note_for_this_bar = pretty_midi.Note(pitch=chord_list_note.pitch,
+                                                     start=chord_list_note.start, end=next_bar_time,
+                                                     velocity=chord_list_note.velocity)
+
+                pitch_event, duration_event = note_to_event_name(note_for_this_bar,duration_time_to_name, duration_times)
+
+            else:
+                pitch_event, duration_event = note_to_event_name(chord_list_note,duration_time_to_name, duration_times)
+
+            temp_pitch_list.append(pitch_event)
+
+        if len(temp_pitch_list) > 0:
+            bar_event_list.extend(temp_pitch_list)
+            bar_event_list.extend(duration_event)
+
+        if chord_list:
+            if chord_list_note.end < next_bar_time:
+                rest_to_bar_end = time2durations(next_bar_time - chord_list_note.end, duration_time_to_name, duration_times)
+
+                bar_event_list.append('rest_e')
+                bar_event_list.extend(rest_to_bar_end)
+
+
+
+    return bar_event_list, continue_note_dict
+
+#
+# def change_bar_event_list(bar_note_pitch_list, bar_note_duration_list, bar_duration):
+#     if len(bar_note_pitch_list) == 0:
+#         duration_event = time2durations(bar_duration, duration_time_to_name, duration_times, is_rest=True)
+
+
+def grid_notes(beat_times, notes,minimum_difference, grid_division=4):
+    divided_beats = []
+    for i in range(len(beat_times) - 1):
+        for j in range(grid_division):
+            divided_beats.append((beat_times[i + 1] - beat_times[i]) / grid_division * j + beat_times[i])
+    divided_beats.append(beat_times[-1])
+
+    for note in notes:
+        start_grid = np.argmin(np.abs(note.start - divided_beats))
+
+        if note.velocity == -1:
+            if note.end > divided_beats[-1]:
+                note.end = divided_beats[-1]
+
+        if note.end < divided_beats[-1]+minimum_difference:
+            end_grid = np.argmin(np.abs(note.end - divided_beats))
+            if start_grid == end_grid:
+
+
+                if end_grid != len(divided_beats)-1:
+                    end_grid += 1
+                else:
+                    if start_grid != 0:
+                        start_grid -= 1
+                    else:
+                        note.start = -1
+                        note.end = -1
+                        continue
+
+            note.start = divided_beats[start_grid]
+            note.end = divided_beats[end_grid]
+
+        else:
+            note.start = divided_beats[start_grid]
+
+    return
+
+
+def get_note_duration_dict(beat_duration,curr_time_signature):
+    duration_name_to_time = {}
+    if curr_time_signature[1] == 4:
+        # 4/4, 2/4, 3/4
+        quarter_note_duration = beat_duration
+        half_note_duration = quarter_note_duration * 2
+        eighth_note_duration = quarter_note_duration / 2
+        sixteenth_note_duration = quarter_note_duration / 4
+        # quarter_triplets_duration = half_note_duration / 3
+        # eighth_triplets_duration = quarter_note_duration / 3
+        # sixteenth_triplets_duration = eighth_note_duration / 3
+        if curr_time_signature[0] >= 4:
+            whole_note_duration = 4 * quarter_note_duration
+        bar_duration = curr_time_signature[0] * quarter_note_duration
+
+    else:
+        # 6/8
+
+        quarter_note_duration = beat_duration / 3 * 2
+        half_note_duration = quarter_note_duration * 2
+        eighth_note_duration = quarter_note_duration / 2
+        sixteenth_note_duration = quarter_note_duration / 4
+        # quarter_triplets_duration = half_note_duration / 3
+        # eighth_triplets_duration = quarter_note_duration / 3
+        # sixteenth_triplets_duration = eighth_note_duration / 3
+
+        bar_duration = curr_time_signature[0] * eighth_note_duration
+
+    duration_name_to_time['half'] = half_note_duration
+    duration_name_to_time['quarter'] = quarter_note_duration
+    duration_name_to_time['eighth'] = eighth_note_duration
+    duration_name_to_time['sixteenth'] = sixteenth_note_duration
+
+    basic_names = duration_name_to_time.keys()
+    name_pairs = itertools.combinations(basic_names, 2)
+    name_triple = itertools.combinations(basic_names, 3)
+    name_quadruple = itertools.combinations(basic_names, 4)
+
+    for name1,name2 in name_pairs:
+        duration_name_to_time[name1+'_'+name2] = duration_name_to_time[name1] + duration_name_to_time[name2]
+
+    for name1, name2,name3 in name_triple:
+        duration_name_to_time[name1 + '_' + name2 + '_' + name3] = duration_name_to_time[name1] + duration_name_to_time[name2] + duration_name_to_time[name3]
+
+    for name1, name2, name3, name4 in name_quadruple:
+        duration_name_to_time[name1 + '_' + name2 + '_' + name3 + '_' + name4] = duration_name_to_time[name1] + duration_name_to_time[
+            name2] + duration_name_to_time[name3] + duration_name_to_time[name4]
+
+
+    duration_name_to_time['zero'] = 0
+
+    # duration_name_to_time['quarter_triplets'] = quarter_triplets_duration
+    # duration_name_to_time['eighth_triplets'] = eighth_triplets_duration
+    # duration_name_to_time['sixteenth_triplets'] = sixteenth_triplets_duration
+
+    if curr_time_signature[0] >= 4 and curr_time_signature[1] == 4:
+        duration_name_to_time['whole'] = whole_note_duration
+
+    duration_time_to_name = {v: k for k, v in duration_name_to_time.items()}
+
+    duration_times = np.sort(np.array(list(duration_time_to_name.keys())))
+    return duration_name_to_time,duration_time_to_name,duration_times,bar_duration
+
+def midi_2event(file_name):
+
+    pm = pretty_midi.PrettyMIDI(file_name)
+
+    pm = remove_drum_track(pm)
+
+    beats = np.unique(pm.get_beats(),axis=0)
+
+    down_beats = np.unique(pm.get_downbeats(),axis=0)
+
+    down_beat_to_beat_indices = []
+    for down_beat in down_beats:
+        down_beat_to_beat_indices.append(np.argmin(np.abs(beats - down_beat)))
+
+
+    signatures = [(signature.numerator, signature.denominator) for signature in pm.time_signature_changes]
+
+    # remove_index = []
+    # for i in range(len(signatures[:-1])):
+    #     if signatures[i+1] == signatures[i]:
+    #         remove_index.append(i)
+    # for i in remove_index[::-1]:
+    #     signatures.remove(i)
+    #     pm.time_signature_changes.remove(i)
+
+    ## todo make sure the time signature and tempo change at the start of the bar
+
+    for signature in signatures:
+        if signature not in [(4,4),(2,4),(3,4),(6,8)]:
+            logger.info(f'not supported signature {signature}, omit {file_name}')
+            return None
+
+
+    signature_change_time = np.array([signature.time for signature in pm.time_signature_changes])
+
+    if signature_change_time[0] != 0:
+        logger.info(f'signature change time not at start, omit {file_name}')
+        return None
+
+    if len(pm.time_signature_changes) > TIME_SIGNATURE_MAX_CHANGE:
+        logger.info(f'more than {TIME_SIGNATURE_MAX_CHANGE} time signature changes, omit {file_name}')
+        return None
+
+
+    signature_change_bars = np.array(np.argmin(np.abs(signature_change_time - down_beats)))
+
+
+
+    tempo_change_times, tempi = pm.get_tempo_changes()
+
+    if tempo_change_times[0] != 0:
+        logger.info(f'tempo change time not at start, omit {file_name}')
+        return None
+
+    if len(tempo_change_times) > TEMPO_MAX_CHANGE:
+        logger.info(f'more than {TEMPO_MAX_CHANGE} tempo changes, omit {file_name}')
+        return None
+
+    if signatures[0] == (6,8):
+        grid_division = 6
+    else:
+        grid_division = 4
+
+    tempo_change_bars = np.argmin(np.abs(np.repeat(tempo_change_times,down_beats.shape[0]).reshape(-1,down_beats.shape[0]) - down_beats),axis=1)
+
+    logger.info(f'working on {file_name}')
+    event_list = []
+    duration_name_to_time = {}
+
+    # track_num = len(pm.instruments)
+
+    track_0_index = track_1_index = track_2_index = 0
+
+    track_num = len(pm.instruments)
+    track_num = track_num if track_num < MAX_TRACK else MAX_TRACK
+    for num in range(track_num):
+        pm.instruments[num].notes.sort(key=lambda note: note.start)
+
+    previous_bar = -1
+    bar_note_pitch_list = []
+    bar_note_duration_list = []
+
+    continue_dict_list = []
+
+    for _ in range(track_num):
+        continue_dict_list.append({})
+
+    for bar, bar_time in enumerate(down_beats[:-1]):
+        event_list.append('bar')
+
+        # if bar == 56:
+        #     logger.info(bar)
+        if bar in signature_change_bars or bar in tempo_change_bars:
+
+            # update duration dictionary
+            if bar in signature_change_bars:
+                signature_change_bar_pos = np.where(bar == signature_change_bars)[0][0]
+                curr_time_signature = signatures[signature_change_bar_pos]
+                event_list.append(f'{curr_time_signature[0]}/{curr_time_signature[1]}')
+
+            if bar in tempo_change_bars:
+                tempo_change_bar_pos = np.where(bar == tempo_change_bars)[0][0]
+
+                event_list.append(f'{tempi[tempo_change_bar_pos]}')
+
+            beat_position = down_beat_to_beat_indices[bar]
+            beat_duration = beats[beat_position + 1] - beats[beat_position]
+
+            duration_name_to_time, duration_time_to_name,duration_times, bar_duration = get_note_duration_dict(beat_duration, curr_time_signature)
+            minimum_difference = duration_name_to_time['sixteenth'] / 2
+
+        if bar == 0:
+            for instrument in pm.instruments[:track_num]:
+                event_list.append(f'i_{instrument.program}')
+
+
+        next_bar_time = down_beats[bar + 1]
+
+
+
+        for track in range(track_num):
+            event_list.append(f'track_{track}')
+
+            # pitch, duration for the next bar if continue
+            continue_note_dict = continue_dict_list[track]
+            # if len(continue_note_dict.keys()) > 0:
+
+                # continue_event_list, _ = bar_notes_to_event(list(continue_note_dict.values()), bar_time,
+                #                                             next_bar_time, beat_in_this_bar, duration_time_to_name,
+                #                                             duration_times, minimum_difference,
+                #                                             is_continue=True)
+                #
+                # event_list.extend(continue_event_list)
+
+
+
+            note_in_this_bar = [note for note in pm.instruments[track].notes if
+                                note.start >= bar_time - minimum_difference and note.start < next_bar_time-minimum_difference]
+
+            # continue_flag.extend([0] * len(note_in_this_bar))
+            beat_in_this_bar = beats[down_beat_to_beat_indices[bar]:down_beat_to_beat_indices[bar+1]+1]
+            if len(continue_note_dict.keys()) > 0:
+                note_in_this_bar = list(continue_note_dict.values()) + note_in_this_bar
+
+            # if len(note_in_this_bar) > 0:
+            #     logger.info(note_in_this_bar)
+
+
+            bar_event_list, continue_note_dict = bar_notes_to_event(note_in_this_bar, bar_time, next_bar_time,beat_in_this_bar,
+                                                                    duration_time_to_name, duration_times, minimum_difference,grid_division=grid_division)
+
+            event_list.extend(bar_event_list)
+            continue_dict_list[track] = continue_note_dict
+    return event_list,pm
+
+
+from collections import Counter
+import re
+
+
+
+def event_2midi(event_list,pm):
+    counts = Counter(event_list)
+
+    event_names = list(counts.keys())
+
+    tempo = float(event_names[2])
+    pm_new = pretty_midi.PrettyMIDI(initial_tempo=tempo)
+
+    numerator = int(event_names[1].split('/')[0])
+    denominator = int(event_names[1].split('/')[1])
+    time_signature = pretty_midi.TimeSignature(numerator, denominator, 0)
+    pm_new.time_signature_changes = [time_signature]
+
+
+
+    r = re.compile('i_\d')
+
+    track_0_program = list(filter(r.match, event_names))[0]
+
+
+
+    program_start_pos = np.where(track_0_program == np.array(event_list))[0][0]
+
+    start_track_pos = np.where('track_0' == np.array(event_list))[0][0]
+    programs = event_list[program_start_pos:start_track_pos]
+
+
+
+    for track in programs:
+        track = pretty_midi.Instrument(program=int(track.split('_')[-1]))
+        pm_new.instruments.append(track)
+
+
+    # add a fake note for duration dict calculation
+    pm_new.instruments[0].notes.append(pretty_midi.Note(
+        velocity=100, pitch=30, start=0, end=10))
+    beats = pm_new.get_beats()
+    pm_new.instruments[0].notes.pop()
+    duration_name_to_time,duration_time_to_name,duration_times,bar_duration = get_note_duration_dict(beats[1]-beats[0],(time_signature.numerator,time_signature.denominator))
+
+    curr_time = 0
+    previous_bar_start_time = 0
+    previous_duration = 0
+
+    in_duration_event = False
+    is_rest_s = False
+    is_continue = False
+
+    pitch_list = []
+    duration_list = []
+
+    bar_num = 0
+    track = 0
+
+
+    sta_dict_list = []
+    track_bar_length = []
+    track_bar_pitch_length = []
+    for _ in programs:
+        sta_dict_list.append({'duration_token_length':[],'bar_length':[], 'pitch_token_length':[]})
+        track_bar_length.append(0)
+        track_bar_pitch_length.append(0)
+
+
+    def total_duration(duration_list):
+        total = 0
+        if duration_list:
+
+            for duration in duration_list:
+                total += duration_name_to_time[duration]
+        return total
+
+    def clear_pitch_duration_event(pm_new,
+                                    track,
+                                   curr_time,
+                                   previous_duration,
+                                   is_rest_s,
+                                   is_continue,
+                                   pitch_list,
+                                   duration_list):
+        if is_rest_s:
+            duration = total_duration(duration_list)
+            curr_time -= previous_duration
+
+        else:
+            duration = total_duration(duration_list)
+
+
+        for pitch in pitch_list:
+            if is_continue:
+                # look for the previous note, and change the end time of it
+                for note in pm_new.instruments[track].notes[::-1]:
+                    if note.end == curr_time and note.pitch == pitch:
+                        note.end += duration
+                        break
+
+            else:
+                if track == 0:
+                    velocity = V0
+                elif track == 1:
+                    velocity = V1
+                else:
+                    velocity = V2
+                note = pretty_midi.Note(velocity=velocity,pitch=pitch,start=curr_time,
+                    end=curr_time + duration)
+                pm_new.instruments[track].notes.append(note)
+
+        curr_time += duration
+        previous_duration = duration
+
+        return curr_time,previous_duration
+
+
+    for i, event in enumerate([event_list[0]] + event_list[start_track_pos:]):
+
+
+
+        if event in duration_name_to_time.keys():
+            duration_list.append(event)
+            in_duration_event = True
+
+            track_bar_length[track] += 1
+
+            continue
+
+        if in_duration_event:
+
+            sta_dict_list[track]['duration_token_length'].append(len(duration_list))
+
+            curr_time, previous_duration = clear_pitch_duration_event(pm_new,
+                                                                      track,
+                                                                      curr_time,
+                                                                      previous_duration,
+                                                                      is_rest_s,
+                                                                      is_continue,
+                                                                      pitch_list,
+                                                                      duration_list)
+            pitch_list = []
+            duration_list = []
+
+            in_duration_event = False
+            is_rest_s = False
+            is_continue = False
+
+
+        pitch_match = re.search(r'p(\d+)', event)
+        if pitch_match:
+
+            track_bar_pitch_length[track] += 1
+
+            pitch = int(pitch_match.group(1))
+            pitch_list.append(pitch)
+
+        if event == 'rest_s':
+            is_rest_s = True
+
+        if event == 'continue':
+            is_continue = True
+
+
+        if event == 'bar':
+            bar_start_time = bar_num * bar_duration
+            bar_num += 1
+
+            if bar_num != 1:
+
+                for i in range(len(programs)):
+                    sta_dict_list[i]['bar_length'].append(track_bar_length[i])
+                    sta_dict_list[i]['pitch_token_length'].append(track_bar_pitch_length[i])
+                    track_bar_length[i] = track_bar_pitch_length[i] = 0
+
+            # if bar_num == 57:
+            #     logger.info(bar_num)
+
+            # validate previous bar total time
+
+            if not math.isclose(bar_start_time,curr_time):
+                logger.info(f'in bar {bar_num} the total duration does not equal bar duration')
+                exit(1)
+            continue
+
+
+        track_match = re.search(r'track_(\d)', event)
+
+        if track_match:
+            curr_time = bar_start_time
+            previous_duration = 0
+            track = int(track_match.group(1))
+
+        track_bar_length[track] += 1
+
+    else:
+
+        for i in range(len(programs)):
+            sta_dict_list[i]['bar_length'].append(track_bar_length[i])
+            sta_dict_list[i]['pitch_token_length'].append(track_bar_pitch_length[i])
+            track_bar_length[i] = track_bar_pitch_length[i] = 0
+
+    return pm_new, sta_dict_list
+
+#
+
+# track_0_sta = {}
+# track_1_sta = {}
+# track_2_sta = {}
+# total_sta = {}
+#
+#
+# def event_statistics(events):
+
+
+
+
+# midi2
+if __name__== "__main__":
+    args = get_args()
+
+    output_folder = args.output_folder
+    
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder,exist_ok=True)
+
+
+
+    logger = logging.getLogger(__name__)
+
+    logger.handlers = []
+    logfile = args.output_folder + '/preprocessing.log'
+    logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO,
+                        datefmt='%Y-%m-%d %H:%M:%S', filename=logfile,filemode='w')
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    # set a format which is simpler for console use
+    formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(message)s',
+                                  datefmt='%Y-%m-%d %H:%M:%S')
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+
+    coloredlogs.install(level='INFO', logger=logger, isatty=True)
+    
+
+    if len(args.file_name) > 0:
+        all_names = [args.file_name]
+        args.input_folder = os.path.dirname(args.file_name)
+    else:
+        all_names = walk(args.input_folder)
+
+    sta_all_song_tracks = []
+    total_event_length = []
+
+    for _ in range(3):
+        sta_all_song_tracks.append({'duration_token_length': [], 'bar_length': [], 'pitch_token_length': []})
+
+    for file_name in all_names:
+        result = midi_2event(file_name)
+        if result is None:
+            continue
+        event_list,pm = result
+
+        if args.input_folder[-1] != '/':
+            args.input_folder += '/'
+        name_with_sub_folder = file_name.replace(args.input_folder, "")
+
+        output_name = os.path.join(output_folder, name_with_sub_folder)
+
+        new_output_folder = os.path.dirname(output_name)
+
+        if not os.path.exists(new_output_folder):
+            os.makedirs(new_output_folder)
+
+
+        pm_new,sta_dict_list = event_2midi(event_list,pm)
+
+
+        for i in range(len(sta_dict_list)):
+
+            sta_all_song_tracks[i]['duration_token_length'].append(np.mean(sta_dict_list[i]['duration_token_length']))
+            sta_all_song_tracks[i]['bar_length'].append(np.mean(sta_dict_list[i]['bar_length']))
+            sta_all_song_tracks[i]['pitch_token_length'].append(np.mean(sta_dict_list[i]['pitch_token_length']))
+
+
+        total_event_length.append(len(event_list))
+
+        base_name = os.path.basename(file_name).split('.')
+        output_name = os.path.join(new_output_folder,base_name[0])
+
+        pickle.dump(event_list, open(os.path.join(new_output_folder,
+                                                     base_name[0]+'_event'),'wb'))
+        pm_new.write(output_name)
+
+    logger.info(f'total files are {len(total_event_length)}')
+    logger.info(f'average event length  {np.mean(total_event_length)}')
+    for i in range(3):
+        for key in sta_all_song_tracks[i].keys():
+            logger.info(f'for track {i}, the average {key} is {np.mean(sta_all_song_tracks[i][key])}')
+
+
+        with open(os.path.join(args.output_folder, f'track_result_{i}.json'), 'w') as fp:
+            json.dump(sta_all_song_tracks[i], fp)
+
+
+
+
