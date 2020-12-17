@@ -45,10 +45,10 @@ def get_args(default='.'):
 def walk(folder_name):
     files = []
     for p, d, f in os.walk(folder_name):
-        for file in f:
-            endname = file.split('.')[-1].lower()
+        for file_name in f:
+            endname = file_name.split('.')[-1].lower()
             if endname == 'mid' or endname == 'midi':
-                files.append(os.path.join(p, file))
+                files.append(os.path.join(p, file_name))
     return files
 
 
@@ -445,7 +445,7 @@ def midi_2event(file_name):
 
     tempo_change_bars = np.argmin(np.abs(np.repeat(tempo_change_times,down_beats.shape[0]).reshape(-1,down_beats.shape[0]) - down_beats),axis=1)
 
-    logger.info(f'working on {file_name}')
+    # logger.info(f'working on {file_name}')
     event_list = []
     duration_name_to_time = {}
 
@@ -519,6 +519,11 @@ def midi_2event(file_name):
             note_in_this_bar = [note for note in pm.instruments[track].notes if
                                 note.start >= bar_time - minimum_difference and note.start < next_bar_time-minimum_difference]
 
+            for note in note_in_this_bar:
+                if note.pitch > TRACK_0_RANGE[1] or note.pitch < TRACK_0_RANGE[0]:
+                    logger.warning(f"note pitch {note.pitch} out of range, skip this file")
+                    return None
+
             # continue_flag.extend([0] * len(note_in_this_bar))
             beat_in_this_bar = beats[down_beat_to_beat_indices[bar]:down_beat_to_beat_indices[bar+1]+1]
             if len(continue_note_dict.keys()) > 0:
@@ -539,9 +544,50 @@ def midi_2event(file_name):
 from collections import Counter
 import re
 
+def filter_empty_bars(events):
+    bar_num = 0
+    filled_bar = 0
+    first_track_num = 0
+
+    for pos,event in enumerate(events):
+        if event == 'bar':
+            bar_num += 1
+            bar_pos = pos
+        if event == 'track_0':
+            if first_track_num == 0:
+                first_track_num = pos
+        if event[0] == 'p':
+            filled_bar = bar_num
+
+            break
+
+    if filled_bar != 1:
+        meta_events = events[:first_track_num]
+
+        return meta_events + events[bar_pos+1:]
+    else:
+        return events
+
+
+
 
 
 def event_2midi(event_list,pm):
+
+    event_list = filter_empty_bars(event_list)
+
+    file1 = open("MyFile.txt", "w")
+    for i in range(len(event_list)-1):
+        event = event_list[i]
+        next_event = event_list[i+1]
+        file1.write(event)
+        file1.write(', ')
+        if next_event == 'bar':
+            file1.write('\n')
+        if next_event == 'track':
+            file1.write(' ')
+    file1.close()
+
     counts = Counter(event_list)
 
     event_names = list(counts.keys())
@@ -799,7 +845,7 @@ if __name__== "__main__":
         result = midi_2event(file_name)
         if result is None:
             continue
-        event_list,pm = result
+        event_list, pm = result
 
         if args.input_folder[-1] != '/':
             args.input_folder += '/'
@@ -830,7 +876,7 @@ if __name__== "__main__":
 
         pickle.dump(event_list, open(os.path.join(new_output_folder,
                                                      base_name[0]+'_event'),'wb'))
-        pm_new.write(output_name)
+        pm_new.write(output_name+'.mid')
 
     logger.info(f'total files are {len(total_event_length)}')
     logger.info(f'average event length  {np.mean(total_event_length)}')
