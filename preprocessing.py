@@ -9,10 +9,13 @@ import json
 import logging
 import coloredlogs
 import _pickle as pickle
+import copy
+from vocab import *
+
 
 TRACK_0_RANGE = (21, 108)
-TRACK_1_RANGE = (28, 52)
-TRACK_2_RANGE = (28, 52)
+# TRACK_1_RANGE = (28, 52)
+# TRACK_2_RANGE = (28, 52)
 
 TIME_SIGNATURE_MAX_CHANGE = 1
 TEMPO_MAX_CHANGE = 1
@@ -46,8 +49,8 @@ def walk(folder_name):
     files = []
     for p, d, f in os.walk(folder_name):
         for file_name in f:
-            endname = file_name.split('.')[-1].lower()
-            if endname == 'mid' or endname == 'midi':
+
+            if file_name[-5:] == 'event':
                 files.append(os.path.join(p, file_name))
     return files
 
@@ -154,7 +157,7 @@ def time2durations(note_duration, duration_time_to_name, duration_times):
 def note_to_event_name(note,duration_time_to_name, duration_times):
     duration_event = time2durations(note.end-note.start, duration_time_to_name, duration_times)
 
-    pitch_event = f'p{note.pitch}'
+    pitch_event = f'p_{note.pitch}'
 
     return pitch_event, duration_event
 
@@ -570,33 +573,29 @@ def filter_empty_bars(events):
 
 
 
+def remove_control_event(file_events):
+    new_file_events = copy.copy(file_events)
+    for token in new_file_events[::-1]:
+        if token in control_tokens:
+            new_file_events.remove(token)
+    return new_file_events
 
+def event_2midi(event_list):
+    
 
-def event_2midi(event_list,pm):
+    event_list = remove_control_event(event_list)
 
-    event_list = filter_empty_bars(event_list)
+    if event_list[2][0] == 't':
+        # print(event_list)
+        tempo_category = int(event_list[2][2])
 
-    file1 = open("MyFile.txt", "w")
-    for i in range(len(event_list)-1):
-        event = event_list[i]
-        next_event = event_list[i+1]
-        file1.write(event)
-        file1.write(', ')
-        if next_event == 'bar':
-            file1.write('\n')
-        if next_event == 'track':
-            file1.write(' ')
-    file1.close()
-
-    counts = Counter(event_list)
-
-    event_names = list(counts.keys())
-
-    tempo = float(event_names[2])
+        tempo = (tempo_bins[tempo_category] + tempo_bins[tempo_category+1]) / 2
+    else:
+        tempo = float(event_list[2])
     pm_new = pretty_midi.PrettyMIDI(initial_tempo=tempo)
 
-    numerator = int(event_names[1].split('/')[0])
-    denominator = int(event_names[1].split('/')[1])
+    numerator = int(event_list[1].split('/')[0])
+    denominator = int(event_list[1].split('/')[1])
     time_signature = pretty_midi.TimeSignature(numerator, denominator, 0)
     pm_new.time_signature_changes = [time_signature]
 
@@ -604,14 +603,14 @@ def event_2midi(event_list,pm):
 
     r = re.compile('i_\d')
 
-    track_0_program = list(filter(r.match, event_names))[0]
+    programs = list(filter(r.match, event_list))
 
 
 
-    program_start_pos = np.where(track_0_program == np.array(event_list))[0][0]
-
+    # program_start_pos = np.where(track_0_program == np.array(event_list))[0][0]
+    #
     start_track_pos = np.where('track_0' == np.array(event_list))[0][0]
-    programs = event_list[program_start_pos:start_track_pos]
+    # programs = event_list[program_start_pos:start_track_pos]
 
 
 
@@ -703,6 +702,8 @@ def event_2midi(event_list,pm):
     for i, event in enumerate([event_list[0]] + event_list[start_track_pos:]):
 
 
+        if event in control_tokens:
+            continue
 
         if event in duration_name_to_time.keys():
             duration_list.append(event)
@@ -732,7 +733,7 @@ def event_2midi(event_list,pm):
             is_continue = False
 
 
-        pitch_match = re.search(r'p(\d+)', event)
+        pitch_match = re.search(r'p_(\d+)', event)
         if pitch_match:
 
             track_bar_pitch_length[track] += 1
@@ -764,9 +765,10 @@ def event_2midi(event_list,pm):
             # validate previous bar total time
 
             if not math.isclose(bar_start_time,curr_time):
-                logger.info(f'in bar {bar_num} the total duration does not equal bar duration')
-                exit(1)
+                print(f'in bar {bar_num} the total duration does not equal bar duration')
+                # exit(1)
             continue
+
 
 
         track_match = re.search(r'track_(\d)', event)
@@ -784,6 +786,8 @@ def event_2midi(event_list,pm):
             sta_dict_list[i]['bar_length'].append(track_bar_length[i])
             sta_dict_list[i]['pitch_token_length'].append(track_bar_pitch_length[i])
             track_bar_length[i] = track_bar_pitch_length[i] = 0
+            pm_new.instruments[i].notes.append(pretty_midi.Note(
+                velocity=0, pitch=30, start=0, end=curr_time))
 
     return pm_new, sta_dict_list
 
@@ -859,7 +863,7 @@ if __name__== "__main__":
             os.makedirs(new_output_folder)
 
 
-        pm_new,sta_dict_list = event_2midi(event_list,pm)
+        pm_new,sta_dict_list = event_2midi(event_list)
 
 
         for i in range(len(sta_dict_list)):
