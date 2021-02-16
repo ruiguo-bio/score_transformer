@@ -641,32 +641,39 @@ class ParallelLanguageDataset(Dataset):
 
 
             if track_num == 3:
-                ratios = track_ratio[0]
+                # ratios = track_ratio[0]
+
                 track_0_pos = np.where('track_0' == np.array(event))[0]
                 track_1_pos = np.where('track_1' == np.array(event))[0]
                 track_2_pos = np.where('track_2' == np.array(event))[0]
                 all_track_pos = np.sort(np.concatenate([track_0_pos, track_1_pos, track_2_pos]))
 
             else:
-                ratios = track_ratio[1]
+                # ratios = track_ratio[1]
                 track_0_pos = np.where('track_0' == np.array(event))[0]
                 track_1_pos = np.where('track_1' == np.array(event))[0]
-                all_track_pos = np.sort(np.concatenate([track_0_pos, track_1_pos]))
-            bar_number_prob = np.array(bar_ratio[:len(bar_pos)],dtype=float)
-            if not np.any(bar_number_prob):
-                bar_number_prob = np.ones(len(bar_pos))
 
-            print(f'bar number prob is {bar_number_prob}')
-            bar_number_prob /= np.sum(bar_number_prob)
+
+                all_track_pos = np.sort(np.concatenate([track_0_pos, track_1_pos]))
+
+            bar_mask_number = np.random.randint(0,len(bar_pos))
+
+
+            # bar_number_prob = np.array(bar_ratio[:len(bar_pos)],dtype=float)
+            # if not np.any(bar_number_prob):
+            #     bar_number_prob = np.ones(len(bar_pos))
+            #
+            # #print(f'bar number prob is {bar_number_prob}')
+            # bar_number_prob /= np.sum(bar_number_prob)
 
             # if np.sum(bar_number_prob) != 1:
             #     print(bar_number_prob)
             # print(f'bar number prob is {bar_number_prob}')
-            resample_counts = np.random.multinomial(1, bar_number_prob[:len(bar_pos)])
-            bar_mask_number = np.where(resample_counts)[0][0] + 1
+            # resample_counts = np.random.multinomial(1, bar_number_prob[:len(bar_pos)])
+            # bar_mask_number = np.where(resample_counts)[0][0] + 1
             # bar_mask_number = np.random.choice(range(len(bar_pos)), size=1, p=bar_ratio[:len(bar_pos)])
-            bar_start_indices = np.sort(np.random.choice(len(bar_pos),size=bar_mask_number,replace=False))
-            print(f'bar start indices is {bar_start_indices}')
+            bar_start_indices = np.sort(np.random.choice(len(bar_pos),size=bar_mask_number+1,replace=False))
+            #print(f'bar start indices is {bar_start_indices}')
             for bar_start_index in bar_start_indices:
                 # bar_start_index = np.random.choice(len(bar_pos))
 
@@ -681,33 +688,75 @@ class ParallelLanguageDataset(Dataset):
 
 
                 track_start_index = np.where(all_track_pos > bar_start_pos)[0][0]
+
                 track_positions = all_track_pos[track_start_index:track_start_index + track_num]
 
                 track_positions = np.append(track_positions, next_bar_start_pos)
 
-                prob = random.random()
-                # print(prob)
-                if prob < ratios[0]:
-                    # select one track
-                    track_pos_select_index = [np.random.choice(track_num)]
-                elif prob < ratios[0] + ratios[1]:
-                    # select two tracks
-                    track_pos_select_index = np.sort(np.random.choice(track_num, 2, replace=False))
+                if mask_bar_ctr:
+                    start_pos = track_positions[0]
+                    track_positions = np.insert(track_positions, 0, start_pos - 1)
+                    track_positions = np.insert(track_positions, 0, start_pos - 2)
+
+
+                track_with_bar_ctrl_pos = track_positions
+
+                # prob = random.random()
+                # # print(prob)
+                # if prob < ratios[0]:
+                #     # select one track
+                #     track_pos_select_index = [np.random.choice(track_num)]
+                # elif prob < ratios[0] + ratios[1]:
+                #     # select two tracks
+                #     track_pos_select_index = np.sort(np.random.choice(track_num, 2, replace=False))
+                # else:
+                #     # select three tracks
+                #     track_pos_select_index = np.arange(track_num)
+
+                if mask_bar_ctr:
+                    mask_ctr_and_track_num = np.random.randint(0,2+track_num)
+                    track_pos_select_index = np.sort(
+                        np.random.choice(track_num + 2, mask_ctr_and_track_num + 1, replace=False))
+
+
                 else:
-                    # select three tracks
-                    track_pos_select_index = np.arange(track_num)
+                    mask_ctr_and_track_num = np.random.randint(0,track_num)
+                    track_pos_select_index = np.sort(
+                        np.random.choice(track_num, mask_ctr_and_track_num + 1, replace=False))
 
                 if self.verbose:
-                    print(f'mask bar {bar_start_index + 1} track {track_pos_select_index}')
+                    if mask_bar_ctr:
+                        print(f'mask bar {bar_start_index + 1}')
+                        for i in track_pos_select_index:
+                                if i == 0:
+                                    print(f'mask tensile')
+                                elif i == 1:
+                                    print(f'mask diameter')
+                                else:
+                                    print(f'mask track {i-2}')
+                    else:
+                        print(f'mask bar {bar_start_index + 1}, track {track_pos_select_index}')
+
 
                 for track_pos_index in track_pos_select_index:
 
-                    track_start_pos = track_positions[track_pos_index]
-                    if track_pos_index + 1 == len(track_positions):
+                    track_start_pos = track_with_bar_ctrl_pos[track_pos_index]
+                    if track_pos_index + 1 == len(track_with_bar_ctrl_pos):
                         print('why')
-                    track_end_pos = track_positions[track_pos_index + 1]
+                    track_end_pos = track_with_bar_ctrl_pos[track_pos_index + 1]
                     # print(track_start_pos)
                     # print(track_end_pos)
+
+                    # if mask_bar_ctr and track_start_pos in track_0_pos:
+                    #     # mask tensile?
+                    #     prob = random.random()
+                    #     if prob > 0.5:
+                    #         masked_indices_pairs.append((track_start_pos-2,track_start_pos-1))
+                    #     # mask diameter?
+                    #     prob = random.random()
+                    #     if prob > 0.5:
+                    #         masked_indices_pairs.append((track_start_pos - 1, track_start_pos))
+
                     masked_indices_pairs.append((track_start_pos,track_end_pos))
                     # track_event = event[track_start_pos:track_end_pos]
                     # print(track_event)
@@ -751,10 +800,6 @@ class ParallelLanguageDataset(Dataset):
 
         if len(total_tokens) == 0:
             print('why')
-
-
-
-
 
         # print(len(tokens) - len(np.where(output_label==2)[0]))
         # print(len(output_label) - len(np.where(output_label==2)[0])*2)

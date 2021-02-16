@@ -510,12 +510,9 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 3,
                                                 0.5,
                                                 span_ratio_separately_each_epoch,
-                                                mask_bar_num_ratio=[0.07,0.07,0.07,0.07,
-                                                                    0.07,0.07,0.07,0.07,
-                                                                    0.07,0.07,0.05,0.05,
-                                                                    0.05,0.05,0.05,0.05],
-                                                mask_track_num_ratio=[[.5, .25, .25],[.5,.5]],
-                                                mask_bar_ctrl_token=False,
+                                                mask_bar_num_ratio=None,
+                                                mask_track_num_ratio=None,
+                                                mask_bar_ctrl_token=True,
                                                 pretraining=False,
                                                 train_jointly=True)
 
@@ -537,12 +534,9 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 3,
                                                 0.5,
                                                 span_ratio_separately_each_epoch,
-                                                mask_bar_num_ratio=[0.07,0.07,0.07,0.07,
-                                                                    0.07,0.07,0.07,0.07,
-                                                                    0.07,0.07,0.05,0.05,
-                                                                    0.05,0.05,0.05,0.05],
-                                                mask_track_num_ratio=[[.5, .25, .25],[.5,.5]],
-                                                mask_bar_ctrl_token=False,
+                                                mask_bar_num_ratio=None,
+                                                mask_track_num_ratio=None,
+                                                mask_bar_ctrl_token=True,
                                                 pretraining=False,
                                                 train_jointly=True)
 

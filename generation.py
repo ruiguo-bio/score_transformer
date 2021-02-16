@@ -10,7 +10,7 @@ from preprocessing import event_2midi
 import math
 import os
 from vocab import *
-num_of_tracks
+
 span_ratio_separately_each_epoch = np.array([[1, 0, 0], [.5, .5, 0],
                                              [.25, .75, 0], [.25, .5, .25],
                                              [.25, .25, .5]])
@@ -694,7 +694,69 @@ def change_control(batch, control_change, control_tokens,mininum,maximum,mask_ba
     return new_tokens
 
 
+# mask song/track/bar control token, span=1 for all
+def mask_category(events, token_type):
 
+    total_tokens = []
+    total_decoder_in = []
+    total_decoder_target = []
+    
+    for event in events:
+        tokens = []
+        decoder_in = []
+        decoder_target = []
+        start_pos = 0
+        total_masked_ratio = 0
+        masked_num = 0
+        while start_pos < len(event):
+
+
+            # add track selection
+            # if event[start_pos] == 'track_0':
+            #     current_track = 0
+            #     current_track_unmasked = True
+            # if event[start_pos] == 'track_1':
+            #     current_track = 1
+            #     current_track_unmasked = True
+            # if event[start_pos] == 'track_2':
+            #     current_track = 2
+            #     current_track_unmasked = True
+
+            if vocab.token_class_ranges[vocab.char2index(event[start_pos])] == token_type:
+                masked_token = [event[start_pos]]
+                tokens.append(vocab.mask_indices[0])
+
+                decoder_in.append(vocab.mask_indices[0])
+                decoder_in.append(vocab.char2index(masked_token))
+                decoder_target.append(vocab.char2index(masked_token))
+                decoder_target.append(vocab.eos_index)
+
+                masked_num += 1
+                total_masked_ratio += 1 / len(event)
+                start_pos += 1
+
+            else:
+                tokens.append(vocab.char2index(event[start_pos]))
+                start_pos += 1
+        tokens = np.array(tokens)
+
+        if len(decoder_in) > 0:
+            decoder_in = np.array(decoder_in)
+            decoder_target = np.array(decoder_target)
+            # print('\n')
+            # print(f'event length is {len(event)}')
+            # print(f'tokens length is {len(tokens)}')
+            # print(f'masked num is {masked_num}')
+            # print(f'decoder_in length is {len(decoder_in)}')
+            # print(f'decoder_out length is {len(decoder_target)}')
+            # print(f'ratio is {(len(tokens) + len(decoder_in)) / len(event)}')
+            total_tokens.append(tokens)
+            total_decoder_in.append(decoder_in)
+            total_decoder_target.append(decoder_target)
+
+    # print(len(tokens) - len(np.where(output_label==2)[0]))
+    # print(len(output_label) - len(np.where(output_label==2)[0])*2)
+    return total_tokens, total_decoder_in, total_decoder_target
 
 
 
