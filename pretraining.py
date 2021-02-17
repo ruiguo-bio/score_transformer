@@ -795,7 +795,7 @@ def run(config, checkpoint_dir=None,run_id=None):
 
                 # Forward
                 optim.zero_grad()
-                outputs = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
+                outputs,weights = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
                 # logger.info(src.size())
                 # logger.info(tgt.size())
                 # logger.info("outside model, output_size:", outputs.size())
@@ -1393,7 +1393,7 @@ def validate(valid_loader, model,config, ce_weight_all,ce_loss,tempo_loss,densit
 
         tgt_mask = tgt_mask.to(device)
         with torch.no_grad():
-            outputs = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
+            outputs,weights = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
 
             loss_input_1 = rearrange(outputs, 'b t v -> (b t) v')
             loss_input_2 = rearrange(tgt_out, 'b o -> (b o)')
@@ -1559,7 +1559,7 @@ def test_loss_accuracy(test_loader, model, criterion, device, vocab, logger):
 
         tgt_mask = tgt_mask.to(device)
         with torch.no_grad():
-            outputs = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
+            outputs,weights = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
             loss = criterion(rearrange(outputs, 'b t v -> (b t) v'), rearrange(tgt_out, 'b o -> (b o)'))
 
             total_loss += loss.item()

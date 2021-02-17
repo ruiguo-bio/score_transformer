@@ -391,9 +391,9 @@ def _get_activation_fn(activation):
 
     raise RuntimeError("activation should be relu/gelu, not {}".format(activation))
 
-
-transformer_model = Transformer(nhead=4, num_encoder_layers=4,num_decoder_layers=4)
-src = torch.rand((10, 32, 512))
-tgt = torch.rand((20, 32, 512))
-out,attention_weight = transformer_model(src, tgt)
-print(attention_weight.shape)
+#
+# transformer_model = Transformer(nhead=4, num_encoder_layers=4,num_decoder_layers=4)
+# src = torch.rand((10, 32, 512))
+# tgt = torch.rand((20, 32, 512))
+# out,attention_weight = transformer_model(src, tgt)
+# print(attention_weight.shape)

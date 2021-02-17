@@ -65,6 +65,8 @@ def get_args(default='.'):
                         help="control token weight")
     parser.add_argument('-i', '--run_id', default=None, type=str,
                         help="run id")
+    parser.add_argument('-a', '--reset_lr', default=False, type=bool,
+                        help="if to reset lr to 0.0001 after loading the checkpoint")
     #
     # parser.add_argument('-d', '--device', default='cuda:1', type=str,
     #                     help="gpu name")
@@ -165,6 +167,8 @@ def main(**kwargs):
     print(f'platform is {platform}')
     if run_id:
         print(f'run_id is {run_id}')
+    if args.reset_lr:
+        print(f'reset lr to 0.0001')
     print(f'is_ce_only is {is_ce_only}')
     if not is_ce_only:
         print(f'ordinal distance is {distance}')
@@ -185,6 +189,7 @@ def main(**kwargs):
               # "train_jointly": tune.grid_search([True]),
               'd_model': 512,
               'lr':lr,
+              'lr_reset':args.reset_lr,
               'num_encoder_layers': 4,
               'ce_loss_only': is_ce_only,
               'distance': distance,
@@ -448,8 +453,10 @@ def run(config, checkpoint_dir=None,run_id=None):
 
             optim.load_state_dict(optimizer_state)
             print(f'optim loaded lr is {optim.param_groups[0]["lr"]}')
-            optim.param_groups[0]["lr"] = 0.0001
-            print(f'set lr to {optim.param_groups[0]["lr"]}')
+            if config['lr_reset']:
+                optim.param_groups[0]["lr"] = 0.0001
+                print(f'reset lr to {optim.param_groups[0]["lr"]}')
+
 
 
 
@@ -801,7 +808,9 @@ def run(config, checkpoint_dir=None,run_id=None):
 
                 # Forward
                 optim.zero_grad()
-                outputs = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
+                # print('src size',src.size())
+                # print('tgt_inp size',tgt_inp.size())
+                outputs,weights = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
                 # logger.info(src.size())
                 # logger.info(tgt.size())
                 # logger.info("outside model, output_size:", outputs.size())
@@ -1254,7 +1263,7 @@ def validate(valid_loader, model,config, ce_weight_all,ce_loss,tempo_loss,densit
 
         tgt_mask = tgt_mask.to(device)
         with torch.no_grad():
-            outputs = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
+            outputs,weights = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
 
             loss_input_1 = rearrange(outputs, 'b t v -> (b t) v')
             loss_input_2 = rearrange(tgt_out, 'b o -> (b o)')
@@ -1420,7 +1429,7 @@ def test_loss_accuracy(test_loader, model, criterion, device, vocab, logger):
 
         tgt_mask = tgt_mask.to(device)
         with torch.no_grad():
-            outputs = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
+            outputs, weights = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
             loss = criterion(rearrange(outputs, 'b t v -> (b t) v'), rearrange(tgt_out, 'b o -> (b o)'))
 
             total_loss += loss.item()

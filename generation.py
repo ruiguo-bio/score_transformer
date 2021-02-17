@@ -203,7 +203,13 @@ def get_mask_track_name(mask_tracks,mask_idx):
     for one_bar_tracks in mask_tracks:
         for track in one_bar_tracks:
             if total_tracks == mask_idx:
-                return f'track_{track}'
+                if track == 0:
+                    #tensile
+                    return 's_'
+                if track == 1:
+                    #diameter
+                    return 'a_'
+                return f'track_{track-2}'
             else:
                 total_tracks += 1
 
@@ -241,8 +247,8 @@ def clear_pitch_duration_event(
     return curr_time,previous_duration
 
 
-def generate(model,event,mask_bars,mask_tracks,device,mask_bar_control=False):
-    src, tgt_out,mask_bars,mask_tracks = mask_bar_and_track(event, mask_bars=mask_bars, mask_tracks=mask_tracks,mask_bar_ctr=mask_bar_control)
+def generate(model,event,mask_bars,mask_tracks,mask_tensile,mask_diameter,device):
+    src, tgt_out,mask_bars,mask_tracks = mask_bar_and_track(event, mask_bars=mask_bars, mask_tracks=mask_tracks,mask_tensile=mask_tensile,mask_diameter=mask_diameter)
 
 
     src.to(device)
@@ -288,21 +294,34 @@ def generate(model,event,mask_bars,mask_tracks,device,mask_bar_control=False):
                 # print(event)
 
                 if len(this_tgt_inp) == 1:
-                    while event != mask_track_name and sampling_times < 10:
-                        index = sampling(output[-1], 0.9)
-                        event = vocab.index2char(index)
-                        sampling_times += 1
-                    if event != mask_track_name:
-                        sampling_times = 0
-                        while event != mask_track_name and sampling_times < 10:
-                            output = model_generate(model, src, tgt_inp + this_tgt_inp).to(device)
+                    if mask_track_name in ['s_','a_']:
+                        compare_event = event[:2]
+                    else:
+                        compare_event = event
+                    if compare_event != mask_track_name:
+                        while compare_event != mask_track_name and sampling_times < 10:
                             index = sampling(output[-1], 0.9)
                             event = vocab.index2char(index)
                             sampling_times += 1
-                        if event != mask_track_name:
-                            print(f'{event} is not equal to {mask_track_name}')
-                            print(f'mask {mask_idx} needs to be generated again')
-                            this_tgt_failure = True
+                            if mask_track_name in ['s_', 'a_']:
+                                compare_event = event[:2]
+                            else:
+                                compare_event = event
+                        if compare_event != mask_track_name:
+                            sampling_times = 0
+                            while compare_event != mask_track_name and sampling_times < 10:
+                                output = model_generate(model, src, tgt_inp + this_tgt_inp).to(device)
+                                index = sampling(output[-1], 0.9)
+                                event = vocab.index2char(index)
+                                sampling_times += 1
+                                if mask_track_name in ['s_', 'a_']:
+                                    compare_event = event[:2]
+                                else:
+                                    compare_event = event
+                            if compare_event != mask_track_name:
+                                print(f'{compare_event} is not equal to {mask_track_name}')
+                                print(f'mask {mask_idx} needs to be generated again')
+                                this_tgt_failure = True
 
 
                 if event in pitches:
@@ -357,10 +376,11 @@ def generate(model,event,mask_bars,mask_tracks,device,mask_bar_control=False):
                             is_rest_s,
                             duration_list,duration_name_to_time)
 
-                    if not math.isclose(curr_time,bar_duration):
-                        print(f'{curr_time} is not equal to {bar_duration}')
-                        print(f'mask {mask_idx} needs to be generated again')
-                        this_tgt_failure = True
+                    if mask_track_name not in ['s_','a_']:
+                        if not math.isclose(curr_time,bar_duration):
+                            print(f'{curr_time} is not equal to {bar_duration}')
+                            print(f'mask {mask_idx} needs to be generated again')
+                            this_tgt_failure = True
 
 
 
@@ -564,7 +584,8 @@ def restore_marked_input(src_token, generated_output, target_output):
                 restored_with_generated_token = np.insert(restored_with_generated_token, mask_indices[0], token)
 
     # restore with target
-    r = re.compile('track_\d')
+    r = re.compile('(?:track_\d|a_|s_)')
+
     target_mask_names = list(filter(r.match, target_output))
     target_output = np.array(target_output)
     if '<pad>' in target_output:
@@ -628,25 +649,21 @@ def restore_marked_input(src_token, generated_output, target_output):
     restored_empty_fill = src_token.copy()
 
     for i in range(len(mask_indices)):
+
         # print(target_mask_names)
         mask_indices = np.where(restored_empty_fill == 'm_0')[0]
+
+
         # print(mask_indices)
         restored_empty_fill = np.delete(restored_empty_fill, mask_indices[0])
-
-        for token in fill_in_tokens[::-1]:
-            # print(token)
-            restored_empty_fill = np.insert(restored_empty_fill, mask_indices[0], token)
-            # print(target_mask_names[i])
+        if target_mask_names[i][0] == 't':
+            for token in fill_in_tokens[::-1]:
+                # print(token)
+                restored_empty_fill = np.insert(restored_empty_fill, mask_indices[0], token)
+                # print(target_mask_names[i])
         restored_empty_fill = np.insert(restored_empty_fill, mask_indices[0], target_mask_names[i])
 
-    # print where is masked
-    bar_pos = np.where(src_token == 'bar')[0]
 
-    mask_indices = np.where(src_token == 'm_0')[0]
-    # print(f'mask_indices positions are {mask_indices}')
-    r = re.compile('track_\d')
-
-    track_names = list(filter(r.match, target_output))
 
     # for i, index in enumerate(mask_indices):
     #     if index > bar_pos[-1]:
@@ -760,7 +777,7 @@ def mask_category(events, token_type):
 
 
 
-def mask_bar_and_track(event, mask_bars=None, mask_tracks=None, mask_bar_ctr=False):
+def mask_bar_and_track(event, mask_bars=None, mask_tracks=None,mask_tensile=None,mask_diameter=None):
     # mask bar token (w/wo bar control token) and try to generate bar token
 
     total_tokens = []
@@ -830,13 +847,27 @@ def mask_bar_and_track(event, mask_bars=None, mask_tracks=None, mask_bar_ctr=Fal
     mask_bars = list(dict.fromkeys(mask_bars))
 
     if mask_tracks is None:
-        mask_track = [i for i in range(track_nums)]
+        mask_track = [i+2 for i in range(track_nums)]
         mask_tracks = [mask_track for _ in mask_bars]
     else:
         if not isinstance(mask_tracks,list):
-            mask_tracks = [mask_tracks]
+            mask_tracks = [mask_tracks+2]
+        else:
+            mask_tracks = [track + 2 for track in mask_tracks]
         if len(mask_tracks) != len(mask_bars):
             mask_tracks = [mask_tracks for _ in mask_bars]
+
+    if mask_tensile is not None:
+        if len(mask_tensile) != len(mask_bars):
+            mask_tensile = [mask_tensile[0] for _ in mask_bars]
+
+
+    if mask_diameter is not None:
+        if len(mask_diameter) != len(mask_bars):
+            mask_diameter = [mask_diameter[0] for _ in mask_bars]
+
+
+
     # print(f'bar start indices is {bar_start_indices}')
     for i, bar_num in enumerate(mask_bars):
         # bar_start_index = np.random.choice(len(bar_pos))
@@ -854,6 +885,11 @@ def mask_bar_and_track(event, mask_bars=None, mask_tracks=None, mask_bar_ctr=Fal
 
         track_positions = np.append(track_positions, next_bar_start_pos)
 
+
+        start_pos = track_positions[0]
+        track_positions = np.insert(track_positions, 0, start_pos - 1)
+        track_positions = np.insert(track_positions, 0, start_pos - 2)
+        track_with_bar_ctrl_pos = track_positions
         #         prob = random.random()
         #         # print(prob)
         #         if prob < ratios[0]:
@@ -867,19 +903,41 @@ def mask_bar_and_track(event, mask_bars=None, mask_tracks=None, mask_bar_ctr=Fal
         #             track_pos_select_index = np.arange(track_num)
         # print(track_nums)
         # print(bar_start_index)
+
+
+        print(f'mask bar {bar_num + 1} track {np.array(mask_tracks[i]) - 2}')
+
+        if mask_diameter[i]:
+            print(f'mask bar {bar_num + 1} diameter')
+            mask_tracks[i] = np.insert(mask_tracks[i],0,1)
+        if mask_tensile[i]:
+            print(f'mask bar {bar_num + 1} tensile')
+            mask_tracks[i] = np.insert(mask_tracks[i],0,0)
+
+
+
         track_pos_select_index = mask_tracks[i]
 
-        if not isinstance(track_pos_select_index,list):
-            track_pos_select_index = [track_pos_select_index]
+        # if not isinstance(track_pos_select_index,list):
+        #     track_pos_select_index = [track_pos_select_index]
 
-        print(f'mask bar {bar_num + 1} track {track_pos_select_index}')
+
+
+        # if mask_diameter[i]:
+        #     print(f'mask bar {bar_num + 1} diameter')
+        #     track_pos_select_index = np.insert(track_pos_select_index,0,1)
+        # if mask_tensile[i]:
+        #     print(f'mask bar {bar_num + 1} tensile')
+        #     track_pos_select_index = np.insert(track_pos_select_index,0,0)
+
+
 
         for track_pos_index in track_pos_select_index:
 
-            track_start_pos = track_positions[track_pos_index]
+            track_start_pos = track_with_bar_ctrl_pos[track_pos_index]
             if track_pos_index + 1 == len(track_positions):
                 print('why')
-            track_end_pos = track_positions[track_pos_index + 1]
+            track_end_pos = track_with_bar_ctrl_pos[track_pos_index + 1]
             # print(track_start_pos)
             # print(track_end_pos)
             masked_indices_pairs.append((track_start_pos, track_end_pos))
@@ -993,7 +1051,10 @@ def main():
 
     mask_bars = [0,2,3,4,5,7]
     mask_tracks = [0,1]
-    bar_control_change = 1
+    mask_tensile = [0,1,0,1,1,1]
+    mask_diameter = [1]
+    diameter_control_change = 4
+    tensile_control_change = 2
     track_control_change = 2
     total_num = 0
     for batches in test_batches[60:]:
@@ -1001,7 +1062,7 @@ def main():
             total_num += 1
             print(f'the {total_num} data')
             print(f'original track control is {batch[4:16]}')
-            restored_with_generated_token, restored_with_target_token, restored_empty_fill = generate(model, batch, mask_bars, mask_tracks, device)
+            restored_with_generated_token, restored_with_target_token, restored_empty_fill = generate(model, batch, mask_bars, mask_tracks,mask_tensile,mask_diameter, device)
 
 
             restored_with_target_pm,_ = event_2midi(restored_with_target_token.tolist())
@@ -1019,8 +1080,8 @@ def main():
             generated_tensile_category, generated_diameter_category,target_tensile_category,target_diameter_category = cal_bar_control('restore_target.mid', 'restore_generated.mid')
 
             for bar in mask_bars:
-                print(f'bar {bar}, target tensile is {target_tensile_category[bar]} , generated tensile is {generated_tensile_category[bar]} \n'
-                      f'bar {bar}, target diameter is {target_diameter_category[bar]} , generated diameter is {generated_diameter_category[bar]} \n')
+                print(f'bar {bar+1}, target tensile is {target_tensile_category[bar]} , generated tensile is {generated_tensile_category[bar]} \n'
+                      f'bar {bar+1}, target diameter is {target_diameter_category[bar]} , generated diameter is {generated_diameter_category[bar]} \n')
 
             cal_track_control(restored_with_generated_token, restored_with_generated_pm)
             cal_track_control(restored_with_target_token, restored_with_target_pm)
@@ -1030,30 +1091,64 @@ def main():
 
             cal_track_control(np.array(batch), original_pm)
 
-            if bar_control_change != 0:
-                print('change bar control')
-                batch = change_control(batch, bar_control_change, bar_control_tokens,0,11,mask_bars=mask_bars)
+            if diameter_control_change != 0:
+                print('change diameter control')
+                batch = change_control(batch, diameter_control_change, diameter_token,0,11,mask_bars=mask_bars)
 
                 new_bar_control_restored_with_generated_token, new_bar_control_restored_with_target_token, new_bar_control_restored_empty_fill = generate(model, batch,
                                                                                                           mask_bars,
                                                                                                           mask_tracks,
-                                                                                                          device)
+                                                                                                    mask_tensile=[True],
+                                                                                                    mask_diameter=[False],
+                                                                                                    device=device)
 
                 new_bar_control_restored_with_target_pm, _ = event_2midi(new_bar_control_restored_with_target_token.tolist())
-                new_bar_control_restored_with_target_pm.write('new_bar_control_restore_target.mid')
+                new_bar_control_restored_with_target_pm.write('new_bar_diameter_control_restore_target.mid')
 
                 new_bar_control_restored_with_generated_pm, _ = event_2midi(new_bar_control_restored_with_generated_token.tolist())
-                new_bar_control_restored_with_generated_pm.write('new_bar_control_restore_generated.mid')
+                new_bar_control_restored_with_generated_pm.write('new_bar_diameter_control_restore_generated.mid')
 
                 new_bar_control_restored_with_empty_pm, _ = event_2midi(new_bar_control_restored_empty_fill.tolist())
-                new_bar_control_restored_with_empty_pm.write('new_bar_control_restore_empty.mid')
+                new_bar_control_restored_with_empty_pm.write('new_bar_diameter_control_restore_empty.mid')
 
-                generated_tensile_category, generated_diameter_category,target_tensile_category,target_diameter_category = cal_bar_control('new_bar_control_restore_target.mid', 'new_bar_control_restore_generated.mid')
+                generated_tensile_category, generated_diameter_category,target_tensile_category,target_diameter_category = cal_bar_control('new_bar_diameter_control_restore_target.mid', 'new_bar_diameter_control_restore_generated.mid')
 
                 for bar in mask_bars:
                     print(
-                        f'bar {bar}, target tensile is {target_tensile_category[bar] + bar_control_change} , generated tensile is {generated_tensile_category[bar]} \n'
-                        f'bar {bar}, target diameter is {target_diameter_category[bar]  + bar_control_change} , generated diameter is {generated_diameter_category[bar]} \n')
+                        f'bar {bar+1}, target tensile is {target_tensile_category[bar] + diameter_control_change} , generated tensile is {generated_tensile_category[bar]} \n'
+                        f'bar {bar+1}, target diameter is {target_diameter_category[bar]  + diameter_control_change} , generated diameter is {generated_diameter_category[bar]} \n')
+
+            if tensile_control_change != 0:
+                print('change tensile control')
+                batch = change_control(batch, tensile_control_change, tensile_strain_token, 0, 11, mask_bars=mask_bars)
+
+                new_bar_control_restored_with_generated_token, new_bar_control_restored_with_target_token, new_bar_control_restored_empty_fill = generate(
+                    model, batch,
+                    mask_bars,
+                    mask_tracks,
+                    mask_tensile=[False],
+                    mask_diameter=[True],
+                    device=device)
+
+                new_bar_control_restored_with_target_pm, _ = event_2midi(
+                    new_bar_control_restored_with_target_token.tolist())
+                new_bar_control_restored_with_target_pm.write('new_bar_tensile_control_restore_target.mid')
+
+                new_bar_control_restored_with_generated_pm, _ = event_2midi(
+                    new_bar_control_restored_with_generated_token.tolist())
+                new_bar_control_restored_with_generated_pm.write('new_bar_tensile_control_restore_generated.mid')
+
+                new_bar_control_restored_with_empty_pm, _ = event_2midi(
+                    new_bar_control_restored_empty_fill.tolist())
+                new_bar_control_restored_with_empty_pm.write('new_bar_tensile_control_restore_empty.mid')
+
+                generated_tensile_category, generated_tensile_category, target_tensile_category, target_tensile_category = cal_bar_control(
+                    'new_bar_tensile_control_restore_target.mid', 'new_bar_tensile_control_restore_generated.mid')
+
+                for bar in mask_bars:
+                    print(
+                        f'bar {bar+1}, target tensile is {target_tensile_category[bar] + tensile_control_change} , generated tensile is {generated_tensile_category[bar]} \n'
+                        f'bar {bar+1}, target diameter is {target_diameter_category[bar] + tensile_control_change} , generated diameter is {generated_diameter_category[bar]} \n')
 
                 # bar control change should not change track control
                 # print('generated track token')
@@ -1062,39 +1157,39 @@ def main():
                 print('target track token')
                 cal_track_control(new_bar_control_restored_with_target_token, new_bar_control_restored_with_target_pm)
 
-            if track_control_change != 0:
-                print('change track control')
-                batch = change_control(batch, track_control_change, track_control_tokens,0,7)
-
-                new_track_control_restored_with_generated_token, new_track_control_restored_with_target_token, new_track_control_restored_empty_fill = generate(model, batch,
-                                                                                                          mask_bars,
-                                                                                                          mask_tracks,
-                                                                                                          device)
-
-                new_track_control_restored_with_target_pm, _ = event_2midi(new_track_control_restored_with_target_token.tolist())
-                new_track_control_restored_with_target_pm.write('new_track_control_restore_target.mid')
-
-                new_track_control_restored_with_generated_pm, _ = event_2midi(new_track_control_restored_with_generated_token.tolist())
-                new_track_control_restored_with_generated_pm.write('new_track_control_restore_generated.mid')
-
-                new_track_control_restored_with_empty_pm, _ = event_2midi(new_track_control_restored_empty_fill.tolist())
-                new_track_control_restored_with_empty_pm.write('new_track_control_restore_empty.mid')
-
-                generated_tensile_category, generated_diameter_category,target_tensile_category,target_diameter_category = cal_bar_control('new_track_control_restore_target.mid', 'new_track_control_restore_generated.mid')
-
-                # track control change should not change bar control ?
-                for bar in mask_bars:
-                    print(
-                        f'bar {bar}, target tensile is {target_tensile_category[bar]} , generated tensile is {generated_tensile_category[bar]} \n'
-                        f'bar {bar}, target diameter is {target_diameter_category[bar]} , generated diameter is {generated_diameter_category[bar]} \n')
-
-                # print('generated track token')
-                # print(new_track_control_restored_with_generated_token)
-
-                cal_track_control(new_track_control_restored_with_generated_token, new_track_control_restored_with_generated_pm)
-                print('target track token')
-                # cal_track_control(new_track_control_restored_with_target_token, new_track_control_restored_with_target_pm)
-                print(batch[4:16])
+            # if track_control_change != 0:
+            #     print('change track control')
+            #     batch = change_control(batch, track_control_change, track_control_tokens,0,7)
+            #
+            #     new_track_control_restored_with_generated_token, new_track_control_restored_with_target_token, new_track_control_restored_empty_fill = generate(model, batch,
+            #                                                                                               mask_bars,
+            #                                                                                               mask_tracks,
+            #                                                                                               device)
+            #
+            #     new_track_control_restored_with_target_pm, _ = event_2midi(new_track_control_restored_with_target_token.tolist())
+            #     new_track_control_restored_with_target_pm.write('new_track_control_restore_target.mid')
+            #
+            #     new_track_control_restored_with_generated_pm, _ = event_2midi(new_track_control_restored_with_generated_token.tolist())
+            #     new_track_control_restored_with_generated_pm.write('new_track_control_restore_generated.mid')
+            #
+            #     new_track_control_restored_with_empty_pm, _ = event_2midi(new_track_control_restored_empty_fill.tolist())
+            #     new_track_control_restored_with_empty_pm.write('new_track_control_restore_empty.mid')
+            #
+            #     generated_tensile_category, generated_diameter_category,target_tensile_category,target_diameter_category = cal_bar_control('new_track_control_restore_target.mid', 'new_track_control_restore_generated.mid')
+            #
+            #     # track control change should not change bar control ?
+            #     for bar in mask_bars:
+            #         print(
+            #             f'bar {bar}, target tensile is {target_tensile_category[bar]} , generated tensile is {generated_tensile_category[bar]} \n'
+            #             f'bar {bar}, target diameter is {target_diameter_category[bar]} , generated diameter is {generated_diameter_category[bar]} \n')
+            #
+            #     # print('generated track token')
+            #     # print(new_track_control_restored_with_generated_token)
+            #
+            #     cal_track_control(new_track_control_restored_with_generated_token, new_track_control_restored_with_generated_pm)
+            #     print('target track token')
+            #     # cal_track_control(new_track_control_restored_with_target_token, new_track_control_restored_with_target_pm)
+            #     print(batch[4:16])
 
             # print(0)
     # test_dataset = ParallelLanguageDataset('', '',
@@ -1238,7 +1333,7 @@ def model_generate(model, src, tgt):
     tgt_mask = tgt_mask.clone().detach().unsqueeze(0).to('cuda')
 
 
-    output = model.forward(src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None,
+    output,weights = model.forward(src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None,
                            tgt_mask=tgt_mask)
 
     return output.squeeze(0).to('cpu')
