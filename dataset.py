@@ -361,19 +361,21 @@ class ParallelLanguageDataset(Dataset):
                     control_token_length = 0
                     if prob < span_ratio[0]:
                         if start_pos + span_lengths[0] <= len(event):
-                            for event_token in event[start_pos:start_pos + span_lengths[0]]:
+                            for event_token in event[start_pos:start_pos + 1]:
                                 if self.vocab.char2index(event_token) in self.vocab.control_indices:
                                     have_control_token = True
                                     control_token_length += 1
 
+
+                            # all the control token mask span length = 1
                             if have_control_token:
                                 prob = random.random()
                                 if prob < self.control_mask_ratio:
-                                    masked_token = event[start_pos:start_pos + span_lengths[0]]
+                                    masked_token = event[start_pos:start_pos + 1]
                                     tokens.append(self.vocab.mask_indices[masked_num])
-                                    total_masked_ratio += span_lengths[0] / len(event)
+                                    total_masked_ratio += 1 / len(event)
                                     control_masked_ratio['total'] += control_token_length / total_control_tokens
-                                    start_pos += span_lengths[0]
+                                    start_pos += 1
                             else:
                                 prob = random.random()
                                 if prob < random_threshold * 1.5:
@@ -384,7 +386,7 @@ class ParallelLanguageDataset(Dataset):
 
                     elif span_ratio[0] < prob < span_ratio[1] + span_ratio[0]:
                         if start_pos + span_lengths[1] <= len(event):
-                            for event_token in event[start_pos:start_pos + span_lengths[1]]:
+                            for event_token in event[start_pos:start_pos + 1]:
                                 if self.vocab.char2index(event_token) in self.vocab.control_indices:
                                     have_control_token = True
                                     control_token_length += 1
@@ -392,11 +394,11 @@ class ParallelLanguageDataset(Dataset):
                             if have_control_token:
                                 prob = random.random()
                                 if prob < self.control_mask_ratio:
-                                    masked_token = event[start_pos:start_pos + span_lengths[1]]
+                                    masked_token = event[start_pos:start_pos + 1]
                                     tokens.append(self.vocab.mask_indices[masked_num])
                                     control_masked_ratio['total'] += control_token_length / total_control_tokens
-                                    total_masked_ratio += span_lengths[1] / len(event)
-                                    start_pos += span_lengths[1]
+                                    total_masked_ratio += 1 / len(event)
+                                    start_pos += 1
                             else:
                                 prob = random.random()
                                 if prob < random_threshold * 1.5:
@@ -406,7 +408,7 @@ class ParallelLanguageDataset(Dataset):
                                     start_pos += span_lengths[1]
                     else:
                         if start_pos + span_lengths[2] <= len(event):
-                            for event_token in event[start_pos:start_pos + span_lengths[2]]:
+                            for event_token in event[start_pos:start_pos + 1]:
                                 if self.vocab.char2index(event_token) in self.vocab.control_indices:
                                     have_control_token = True
                                     control_token_length += 1
@@ -414,11 +416,11 @@ class ParallelLanguageDataset(Dataset):
                             if have_control_token:
                                 prob = random.random()
                                 if prob < self.control_mask_ratio:
-                                    masked_token = event[start_pos:start_pos + span_lengths[2]]
+                                    masked_token = event[start_pos:start_pos + 1]
                                     tokens.append(self.vocab.mask_indices[masked_num])
                                     control_masked_ratio['total'] += control_token_length / total_control_tokens
-                                    total_masked_ratio += span_lengths[2] / len(event)
-                                    start_pos += span_lengths[2]
+                                    total_masked_ratio += 1 / len(event)
+                                    start_pos += 1
                             else:
                                 prob = random.random()
                                 if prob < random_threshold * 1.5:
@@ -1190,122 +1192,122 @@ def walk(folder_name):
             if file_name[-5:] == 'event':
                 files.append(os.path.join(p, file_name))
     return files
-vocab = WordVocab(all_tokens)
-event_folder = '/home/ruiguo/dataset/lmd/lmd_separate_event/'
-tension_folder = '/home/ruiguo/dataset/lmd/lmd_tension_three_tracks'
-file_size = 100
-window_size = 8
-
-files = walk(event_folder)
+# vocab = WordVocab(all_tokens)
+# event_folder = '/home/ruiguo/dataset/lmd/lmd_separate_event/'
+# tension_folder = '/home/ruiguo/dataset/lmd/lmd_tension_three_tracks'
+# file_size = 100
+# window_size = 8
 #
-keydata = json.load(open(tension_folder + '/files_result.json','r'))
+# files = walk(event_folder)
+# #
+# keydata = json.load(open(tension_folder + '/files_result.json','r'))
+# #
+# def gen_batches(files, key_data, max_token_length=2400, batch_window_size=8):
+#     batches = []
+#     for i in range(len(files)):
 #
-def gen_batches(files, key_data, max_token_length=2400, batch_window_size=8):
-    batches = []
-    for i in range(len(files)):
-
-        file_events = np.array(pickle.load(open(files[i], 'rb')))
-        num_of_tracks = len(file_events[3:np.where('track_0' == file_events)[0][0]])
-        if num_of_tracks < 2:
-            print(f'omit file {files[i]} with only one track')
-            continue
-
-        file_name_in_folder = files[i].split('lmd_separate_event')[1:][0][:-6]
-        tensile_file = tension_folder + file_name_in_folder + '.tensile'
-        diameter_file = tension_folder + file_name_in_folder + '.diameter'
-
-        tensiles = np.array(pickle.load(open(tensile_file, 'rb')))
-        diameters = np.array(pickle.load(open(diameter_file, 'rb')))
-        if tension_folder + file_name_in_folder + '.mid' in key_data:
-            keys = key_data[tension_folder + file_name_in_folder + '.mid']
-        else:
-            print(f'omit file {files[i]} with no key')
-            continue
-        # if keys[2] != -1:
-        #     print(f'file name is {files[i]}')
-
-        events_with_control, keys = add_control_event(file_events, tensiles, diameters, keys)
-
-        bar_pos = np.where(events_with_control == 'bar')[0]
-        # total_bars = min(len(tensiles), len(diameters), len(bar_pos))
-        # bar_pos = bar_pos[:total_bars]
-
-        bar_beginning_pos = bar_pos[::batch_window_size]
-
-        meta_events = events_with_control[1:np.where('track_0' == events_with_control)[0][0] - 2]
-        meta_without_track_control = np.concatenate([meta_events[0:3],meta_events[-3:]],axis=0)
-        if len(bar_beginning_pos) <= 2:
-            return_events = events_with_control
-            r = re.compile('i_\d')
-
-            if len(list(filter(r.match, return_events.tolist()))) > 3:
-                print('invalid')
-
-            batches.append(return_events.tolist())
-        else:
-            for pos in range(len(bar_beginning_pos) - 1):
-
-                # print(bar_beginning_pos[pos])
-                if keys[2] != -1 and pos * 8 + 1 >= keys[2]:
-                    meta_without_track_control[2] = key_to_token[keys[3]]
-                if pos == len(bar_beginning_pos) - 2:
-                    # skip the last one
-                    # continue
-                    # return_events = file_events[bar_beginning_pos[pos]:]
-                    events_with_header = np.insert(events_with_control[bar_beginning_pos[pos]:], 1, meta_without_track_control)
-                    return_events = add_control_event(events_with_header)
-
-                elif pos > 0:
-
-                    events_with_header = np.insert(events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]], 1,
-                                              meta_without_track_control)
-                    return_events = add_control_event(events_with_header)
-                # no need to change for first one
-                else:
-                    return_events = events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]]
-
-                r = re.compile('i_\d')
-
-                if len(list(filter(r.match, return_events.tolist()))) > 3:
-                    print('invalid')
-
-                batches.append(return_events.tolist())
-    batches.sort(key=len)
-    i = 0
-    while i < len(batches) - 1:
-        if batches[i] == batches[i + 1]:
-            del batches[i + 1]
-        else:
-            i += 1
-
-    batches_new = []
-    this_batch_total_length = 0
-
-    while len(batches) > 0:
-        if this_batch_total_length + len(batches[0]) < max_token_length:
-            if len(batches_new) > 0:
-                batches_new[-1].append(batches[0])
-            else:
-                batches_new.append([batches[0]])
-            this_batch_total_length += len(batches[0])
-        else:
-            if len(batches[0]) > max_token_length:
-                print(
-                    f'the event size {len(batches[0])} is greater than {max_token_length}, skip this file, or increase the max token length')
-                this_batch_total_length = 0
-            else:
-                batches_new.append([batches[0]])
-                this_batch_total_length = len(batches[0])
-        del batches[0]
-    del batches
-    gc.collect()
-    batch_lengths = {}
-    for index, item in enumerate(batches_new):
-        if len(item) not in batch_lengths:
-            batch_lengths[len(item)] = [index]
-        else:
-            batch_lengths[len(item)].append(index)
-    return batches_new, batch_lengths
+#         file_events = np.array(pickle.load(open(files[i], 'rb')))
+#         num_of_tracks = len(file_events[3:np.where('track_0' == file_events)[0][0]])
+#         if num_of_tracks < 2:
+#             print(f'omit file {files[i]} with only one track')
+#             continue
+#
+#         file_name_in_folder = files[i].split('lmd_separate_event')[1:][0][:-6]
+#         tensile_file = tension_folder + file_name_in_folder + '.tensile'
+#         diameter_file = tension_folder + file_name_in_folder + '.diameter'
+#
+#         tensiles = np.array(pickle.load(open(tensile_file, 'rb')))
+#         diameters = np.array(pickle.load(open(diameter_file, 'rb')))
+#         if tension_folder + file_name_in_folder + '.mid' in key_data:
+#             keys = key_data[tension_folder + file_name_in_folder + '.mid']
+#         else:
+#             print(f'omit file {files[i]} with no key')
+#             continue
+#         # if keys[2] != -1:
+#         #     print(f'file name is {files[i]}')
+#
+#         events_with_control, keys = add_control_event(file_events, tensiles, diameters, keys)
+#
+#         bar_pos = np.where(events_with_control == 'bar')[0]
+#         # total_bars = min(len(tensiles), len(diameters), len(bar_pos))
+#         # bar_pos = bar_pos[:total_bars]
+#
+#         bar_beginning_pos = bar_pos[::batch_window_size]
+#
+#         meta_events = events_with_control[1:np.where('track_0' == events_with_control)[0][0] - 2]
+#         meta_without_track_control = np.concatenate([meta_events[0:3],meta_events[-3:]],axis=0)
+#         if len(bar_beginning_pos) <= 2:
+#             return_events = events_with_control
+#             r = re.compile('i_\d')
+#
+#             if len(list(filter(r.match, return_events.tolist()))) > 3:
+#                 print('invalid')
+#
+#             batches.append(return_events.tolist())
+#         else:
+#             for pos in range(len(bar_beginning_pos) - 1):
+#
+#                 # print(bar_beginning_pos[pos])
+#                 if keys[2] != -1 and pos * 8 + 1 >= keys[2]:
+#                     meta_without_track_control[2] = key_to_token[keys[3]]
+#                 if pos == len(bar_beginning_pos) - 2:
+#                     # skip the last one
+#                     # continue
+#                     # return_events = file_events[bar_beginning_pos[pos]:]
+#                     events_with_header = np.insert(events_with_control[bar_beginning_pos[pos]:], 1, meta_without_track_control)
+#                     return_events = add_control_event(events_with_header)
+#
+#                 elif pos > 0:
+#
+#                     events_with_header = np.insert(events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]], 1,
+#                                               meta_without_track_control)
+#                     return_events = add_control_event(events_with_header)
+#                 # no need to change for first one
+#                 else:
+#                     return_events = events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]]
+#
+#                 r = re.compile('i_\d')
+#
+#                 if len(list(filter(r.match, return_events.tolist()))) > 3:
+#                     print('invalid')
+#
+#                 batches.append(return_events.tolist())
+#     batches.sort(key=len)
+#     i = 0
+#     while i < len(batches) - 1:
+#         if batches[i] == batches[i + 1]:
+#             del batches[i + 1]
+#         else:
+#             i += 1
+#
+#     batches_new = []
+#     this_batch_total_length = 0
+#
+#     while len(batches) > 0:
+#         if this_batch_total_length + len(batches[0]) < max_token_length:
+#             if len(batches_new) > 0:
+#                 batches_new[-1].append(batches[0])
+#             else:
+#                 batches_new.append([batches[0]])
+#             this_batch_total_length += len(batches[0])
+#         else:
+#             if len(batches[0]) > max_token_length:
+#                 print(
+#                     f'the event size {len(batches[0])} is greater than {max_token_length}, skip this file, or increase the max token length')
+#                 this_batch_total_length = 0
+#             else:
+#                 batches_new.append([batches[0]])
+#                 this_batch_total_length = len(batches[0])
+#         del batches[0]
+#     del batches
+#     gc.collect()
+#     batch_lengths = {}
+#     for index, item in enumerate(batches_new):
+#         if len(item) not in batch_lengths:
+#             batch_lengths[len(item)] = [index]
+#         else:
+#             batch_lengths[len(item)].append(index)
+#     return batches_new, batch_lengths
 
 #
 # all_batches,batch_length = gen_batches(files,keydata)

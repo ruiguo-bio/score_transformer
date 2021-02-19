@@ -106,6 +106,10 @@ class WordVocab(object):
         self.control_names = ['program', 'tempo', 'key', 'pitch_register',
                               'polyphony', 'density', 'occupation', 'tensile',
                               'diameter']
+        self.track_control_names = ['pitch_register',
+                              'polyphony', 'density', 'occupation']
+        self.bar_control_names = ['tensile',
+                              'diameter']
         for index in self.program_indices:
             self.token_class_ranges[index] = 'program'
         for index in self.tempo_indices:
