@@ -4,6 +4,7 @@ import numpy as np
 pad = '<pad>'
 eos = '<eos>'
 mask = [f'm_{num}' for num in range(1)]
+# ignore = 'ignore'
 special_tokens = [pad, eos]
 
 time_signature_token = ['4/4', '3/4', '2/4', '6/8']
@@ -33,7 +34,7 @@ header_token = time_signature_token + tempo_token + program_num + key_token
 track_note_density_token = [f'd_{num}' for num in range(10)]
 track_occupation_rate_token = [f'o_{num}' for num in range(10)]
 track_polyphony_rate_token = [f'y_{num}' for num in range(10)]
-track_pitch_register_token = [f'r_{num}' for num in range(10)]
+track_pitch_register_token = [f'r_{num}' for num in range(8)]
 
 track_control_tokens = track_note_density_token + \
                        track_occupation_rate_token + \
@@ -44,8 +45,10 @@ tensile_strain_token = [f's_{num}' for num in range(12)]
 diameter_token = [f'a_{num}' for num in range(12)]
 
 bar_control_tokens = tensile_strain_token + diameter_token
+head_control_tokens = track_control_tokens + header_token
+control_tokens = bar_control_tokens + track_control_tokens
+all_meta_tokens = bar_control_tokens + head_control_tokens
 
-control_tokens = bar_control_tokens + track_control_tokens + key_token
 
 rests = ['rest_e', 'rest_s']
 
@@ -85,6 +88,7 @@ class WordVocab(object):
         print(f'vocab size: {self.vocab_size}')
 
         self.token_class_ranges = {}
+        self.name_to_tokens= {}
         self.structure_indices = [self._char2idx[name] for name in structure_token]
         self.pitch_indices = [self._char2idx[name] for name in pitches]
         self.mask_indices = [self._char2idx[name] for name in mask]
@@ -101,7 +105,7 @@ class WordVocab(object):
         self.diameter_indices = [self._char2idx[name] for name in diameter_token]
         self.control_indices = self.key_indices + self.density_indices + self.occupation_indices + \
                                self.polyphony_indices + self.pitch_register_indices + self.tempo_indices + \
-                               self.tensile_indices + self.diameter_indices + self.program_indices
+                               self.tensile_indices + self.diameter_indices + self.program_indices + self.time_signature_indices
 
         self.control_names = ['program', 'tempo', 'key', 'pitch_register',
                               'polyphony', 'density', 'occupation', 'tensile',
@@ -112,36 +116,93 @@ class WordVocab(object):
                               'diameter']
         for index in self.program_indices:
             self.token_class_ranges[index] = 'program'
+            if 'program' in self.name_to_tokens:
+                self.name_to_tokens['program'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['program'] = [self._idx2char[index]]
         for index in self.tempo_indices:
             self.token_class_ranges[index] = 'tempo'
+            if 'tempo' in self.name_to_tokens:
+                self.name_to_tokens['tempo'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['tempo'] = [self._idx2char[index]]
         for index in self.time_signature_indices:
             self.token_class_ranges[index] = 'time_signature'
+            if 'time_signature' in self.name_to_tokens:
+                self.name_to_tokens['time_signature'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['time_signature'] = [self._idx2char[index]]
         for index in self.key_indices:
             self.token_class_ranges[index] = 'key'
+            if 'key' in self.name_to_tokens:
+                self.name_to_tokens['key'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['key'] = [self._idx2char[index]]
+
         for index in self.density_indices:
             self.token_class_ranges[index] = 'density'
+            if 'density' in self.name_to_tokens:
+                self.name_to_tokens['density'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['density'] = [self._idx2char[index]]
         for index in self.occupation_indices:
             self.token_class_ranges[index] = 'occupation'
+            if 'occupation' in self.name_to_tokens:
+                self.name_to_tokens['occupation'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['occupation'] = [self._idx2char[index]]
         for index in self.polyphony_indices:
             self.token_class_ranges[index] = 'polyphony'
+            if 'polyphony' in self.name_to_tokens:
+                self.name_to_tokens['polyphony'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['polyphony'] = [self._idx2char[index]]
         for index in self.pitch_register_indices:
             self.token_class_ranges[index] = 'pitch_register'
+            if 'pitch_register' in self.name_to_tokens:
+                self.name_to_tokens['pitch_register'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['pitch_register'] = [self._idx2char[index]]
 
         for index in self.structure_indices:
             self.token_class_ranges[index] = 'structure'
+            if 'structure' in self.name_to_tokens:
+                self.name_to_tokens['structure'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['structure'] = [self._idx2char[index]]
         for index in self.pitch_indices:
             self.token_class_ranges[index] = 'pitch'
+            if 'pitch' in self.name_to_tokens:
+                self.name_to_tokens['pitch'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['pitch'] = [self._idx2char[index]]
         for index in self.duration_indices:
             self.token_class_ranges[index] = 'duration'
+            if 'duration' in self.name_to_tokens:
+                self.name_to_tokens['duration'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['duration'] = [self._idx2char[index]]
         # for index in self.mask_indices:
         #     self.token_class_ranges[index] = 'mask'
 
         for index in self.tensile_indices:
             self.token_class_ranges[index] = 'tensile'
+            if 'tensile' in self.name_to_tokens:
+                self.name_to_tokens['tensile'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['tensile'] = [self._idx2char[index]]
         for index in self.diameter_indices:
             self.token_class_ranges[index] = 'diameter'
+            if 'diameter' in self.name_to_tokens:
+                self.name_to_tokens['diameter'].append(self._idx2char[index])
+            else:
+                self.name_to_tokens['diameter'] = [self._idx2char[index]]
 
         self.token_class_ranges[self.eos_index] = 'eos'
+        if 'eos' in self.name_to_tokens:
+            self.name_to_tokens['eos'].append(self._idx2char[index])
+        else:
+            self.name_to_tokens['eos'] = [self._idx2char[index]]
         self.class_names = set(self.token_class_ranges.values())
 
     def char2index(self, token):

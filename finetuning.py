@@ -67,6 +67,9 @@ def get_args(default='.'):
                         help="run id")
     parser.add_argument('-a', '--reset_lr', default=False, type=bool,
                         help="if to reset lr to 0.0001 after loading the checkpoint")
+
+    parser.add_argument('-n', '--new_data', default=False, type=bool,
+                        help="use generated data to train, default false")
     #
     # parser.add_argument('-d', '--device', default='cuda:1', type=str,
     #                     help="gpu name")
@@ -143,6 +146,7 @@ def main(**kwargs):
     run_id = args.run_id
     is_ce_only = args.ce_only
     control_token_weight = args.control_token_weight
+    use_new_data = args.new_data
     #device = args.device
 
     # max_token_length = 2200
@@ -175,6 +179,7 @@ def main(**kwargs):
     print(f'learning rate is {lr}')
     print(f'control token weight is {control_token_weight}')
     print(f'fine tuning')
+    print(f'use new data is {use_new_data}')
     if checkpoint_dir:
         print(f'checkpoint dir is {checkpoint_dir}')
 
@@ -185,7 +190,7 @@ def main(**kwargs):
 
               "span_lengths": 3,
               "span_ratio_jointly": 0.5,
-              "eos_weight": 0.8,
+              "eos_weight": 1,
               # "train_jointly": tune.grid_search([True]),
               'd_model': 512,
               'lr':lr,
@@ -194,6 +199,7 @@ def main(**kwargs):
               'ce_loss_only': is_ce_only,
               'distance': distance,
               'epochs':num_epochs,
+              'use_new_data':use_new_data,
               'control_token_weight':control_token_weight,
               # 'num_decoder_layers': tune.grid_search([4]),
               # 'dim_feedforward': tune.grid_search([2048]),
@@ -296,8 +302,8 @@ def main(**kwargs):
         #     folder_prefix = '/home/ruiguo/'
         # else:
         #     folder_prefix = '/content/drive/MyDrive/'
-        # test_batches = pickle.load(open(folder_prefix + 'score_transformer/test_batches_0_0_5_new_bins', 'rb'))
-        # test_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/test_batch_lengths_0_0_5_new_bins', 'rb'))
+        # test_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/test_batches_0_0_8', 'rb'))
+        # test_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/sync/test_batch_lengths_0_0_8', 'rb'))
         #
         # test_dataset = ParallelLanguageDataset('', '',
         #                                        vocab, 0,
@@ -378,12 +384,21 @@ def logging_config(output_folder, append=False):
 
 
 def run(config, checkpoint_dir=None,run_id=None):
+    if is_debug:
+        mode = 'offline'
+    else:
+        mode='online'
 
     if run_id:
         resume = 'allow'
     else:
         resume = None
-    with wandb.init(project="score_transformer", config=config,resume=resume,id=run_id):
+
+    if platform == 'local':
+        wandb_dir = '/home/data/guorui'
+    else:
+        wandb_dir = './'
+    with wandb.init(project="score_transformer",mode=mode, dir=wandb_dir, tags=['finetune'],config=config,resume=resume,id=run_id):
         # access all HPs through wandb.config, so logging matches execution!
         config = wandb.config
         current_folder = wandb.run.dir
@@ -468,27 +483,38 @@ def run(config, checkpoint_dir=None,run_id=None):
         else:
             folder_prefix = '/content/drive/MyDrive/'
 
-        if is_debug:
-            train_batch_name = 'test_batches_0_0_1_new_bins'
-            train_length_name = 'test_batch_lengths_0_0_1_new_bins'
-            valid_batch_name = 'valid_batches_0_0_1_new_bins'
-            valid_batch_length_name = 'valid_batch_lengths_0_0_1_new_bins'
-
+        if config['use_new_data']:
+            train_batch_name = 'all_batches_new'
+            train_length_name = 'batch_length_new'
+            if is_debug:
+                valid_batch_name = 'valid_batches_0_0_1'
+                valid_batch_length_name = 'valid_batch_lengths_0_0_1'
+            else:
+                valid_batch_name = 'valid_batches_0_0_8'
+                valid_batch_length_name = 'valid_batch_lengths_0_0_8'
         else:
-            train_batch_name = 'train_batches_0_5_new_bins'
-            train_length_name = 'train_batch_lengths_0_5_new_bins'
-            valid_batch_name = 'valid_batches_0_0_5_new_bins'
-            valid_batch_length_name = 'valid_batch_lengths_0_0_5_new_bins'
 
-        train_batches = pickle.load(open(folder_prefix + 'score_transformer/' + train_batch_name, 'rb'))
-        train_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/' + train_length_name, 'rb'))
+            if is_debug:
+                train_batch_name = 'test_batches_0_0_1'
+                train_length_name = 'test_batch_lengths_0_0_1'
+                valid_batch_name = 'valid_batches_0_0_1'
+                valid_batch_length_name = 'valid_batch_lengths_0_0_1'
 
-        valid_batches = pickle.load(open(folder_prefix + 'score_transformer/' + valid_batch_name, 'rb'))
+            else:
+                train_batch_name = 'train_batches_0_8'
+                train_length_name = 'train_batch_lengths_0_8'
+                valid_batch_name = 'valid_batches_0_0_8'
+                valid_batch_length_name = 'valid_batch_lengths_0_0_8'
+
+        train_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/' + train_batch_name, 'rb'))
+        train_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/sync/' + train_length_name, 'rb'))
+
+        valid_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/' + valid_batch_name, 'rb'))
         valid_batch_lengths = pickle.load(
-            open(folder_prefix + 'score_transformer/' + valid_batch_length_name, 'rb'))
+            open(folder_prefix + 'score_transformer/sync/' + valid_batch_length_name, 'rb'))
 
-        # test_batches = pickle.load(open(folder_prefix + 'score_transformer/test_batches_0_0_1_new_bins', 'rb'))
-        # test_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/test_batch_lengths_0_0_1_new_bins', 'rb'))
+        # test_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/test_batches_0_0_1', 'rb'))
+        # test_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/sync/test_batch_lengths_0_0_1', 'rb'))
 
         logger.info(f'train batches file is  {folder_prefix + "score_transformer/" + train_batch_name}')
         logger.info(f'valid batches file is  {folder_prefix + "score_transformer/" + valid_batch_name}')
@@ -519,8 +545,9 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 span_ratio_separately_each_epoch,
                                                 mask_bar_num_ratio=None,
                                                 mask_track_num_ratio=None,
-                                                mask_bar_ctrl_token=True,
+                                                mask_bar_ctrl_token=False,
                                                 pretraining=False,
+                                                fine_tune_prediction=False,
                                                 train_jointly=True)
 
         valid_dataset = ParallelLanguageDataset('',
@@ -543,8 +570,9 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 span_ratio_separately_each_epoch,
                                                 mask_bar_num_ratio=None,
                                                 mask_track_num_ratio=None,
-                                                mask_bar_ctrl_token=True,
+                                                mask_bar_ctrl_token=False,
                                                 pretraining=False,
+                                                fine_tune_prediction=False,
                                                 train_jointly=True)
 
 
@@ -614,43 +642,37 @@ def run(config, checkpoint_dir=None,run_id=None):
         #     weight[1] = 1
         ce_weight = torch.ones(vocab.vocab_size, device=device)
         ce_weight[0] = 0
-        # ce_weight[1] = 1
         ce_weight[1] = config['eos_weight']
-        ce_weight[11:18] = 0
-        ce_weight[170:234] = 0
+        ce_weight[7:234] = 0
         ce_loss = nn.CrossEntropyLoss(ignore_index=0, weight=ce_weight,reduction='none')
 
         ce_weight_all = torch.ones(vocab.vocab_size, device=device)
         ce_weight_all[0] = 0
-        ce_weight_all[1] = 1
         ce_weight_all[1] = config['eos_weight']
+        ce_weight_all[7:234] = config['control_token_weight']
 
-        # ce_weight_all[11:18] = config['control_token_weight']
-        # ce_weight_all[170:234] = config['control_token_weight']
-
-        #
-        #
-        # ce_loss_all_mean = nn.CrossEntropyLoss(ignore_index=0, weight=ce_weight_all)
-        #
-        # ce_loss_all_no_reduction = nn.CrossEntropyLoss(ignore_index=0, weight=ce_weight_all,reduction='none')
-        #
-        # if config['ce_loss_only'] is False:
-        # if config['ce_loss_only'] is False:
-        #     weight[11:18] = 0
-        #     weight[170:234] = 0
-
-
-        # pitch, rhythm, key, program, time signature, structure,eos loss
 
 
         if config['ce_loss_only'] is True:
             logger.info('ce only loss')
+            time_signature_weight = torch.zeros(vocab.vocab_size, device=device)
+            time_signature_weight[7:11] = config['control_token_weight']
+            time_signature_loss = nn.CrossEntropyLoss(ignore_index=0, weight=time_signature_weight, reduction='none')
+
             tempo_weight = torch.zeros(vocab.vocab_size, device=device)
-            tempo_weight[11:18] = 1
+            tempo_weight[11:18] = config['control_token_weight']
             tempo_loss = nn.CrossEntropyLoss(ignore_index=0, weight=tempo_weight,reduction='none')
 
+            program_weight = torch.zeros(vocab.vocab_size, device=device)
+            program_weight[18:146] = config['control_token_weight']
+            program_loss = nn.CrossEntropyLoss(ignore_index=0, weight=program_weight, reduction='none')
+
+            key_weight = torch.zeros(vocab.vocab_size, device=device)
+            key_weight[146:170] = config['control_token_weight']
+            key_loss = nn.CrossEntropyLoss(ignore_index=0, weight=key_weight, reduction='none')
+
             density_weight = torch.zeros(vocab.vocab_size, device=device)
-            density_weight[170:180] = 1
+            density_weight[170:180] = config['control_token_weight']
             density_loss = nn.CrossEntropyLoss(ignore_index=0, weight=density_weight,reduction='none')
 
             occupation_weight = torch.zeros(vocab.vocab_size, device=device)
@@ -658,19 +680,19 @@ def run(config, checkpoint_dir=None,run_id=None):
             occupation_loss = nn.CrossEntropyLoss(ignore_index=0, weight=occupation_weight,reduction='none')
 
             polyphony_weight = torch.zeros(vocab.vocab_size, device=device)
-            polyphony_weight[190:200] = 1
+            polyphony_weight[190:200] = config['control_token_weight']
             polyphony_loss = nn.CrossEntropyLoss(ignore_index=0, weight=polyphony_weight,reduction='none')
 
             pitch_register_weight = torch.zeros(vocab.vocab_size, device=device)
-            pitch_register_weight[200:210] = 1
+            pitch_register_weight[200:210] = config['control_token_weight']
             pitch_register_loss = nn.CrossEntropyLoss(ignore_index=0, weight=pitch_register_weight,reduction='none')
 
             tensile_weight = torch.zeros(vocab.vocab_size, device=device)
-            tensile_weight[210:222] = 1
+            tensile_weight[210:222] = config['control_token_weight']
             tensile_loss = nn.CrossEntropyLoss(ignore_index=0, weight=tensile_weight,reduction='none')
 
             diameter_weight = torch.zeros(vocab.vocab_size, device=device)
-            diameter_weight[222:234] = 1
+            diameter_weight[222:234] = config['control_token_weight']
             diameter_loss = nn.CrossEntropyLoss(ignore_index=0, weight=diameter_weight,reduction='none')
 
         else:
@@ -685,12 +707,12 @@ def run(config, checkpoint_dir=None,run_id=None):
             tensile_loss = OrdinalLoss((210, 221), vocab.vocab_size,distance=config.distance,device=device)
             diameter_loss = OrdinalLoss((222, 233), vocab.vocab_size,distance=config.distance,device=device)
 
-        criteria = [ce_loss,tempo_loss,density_loss,occupation_loss,polyphony_loss,
+        criteria = [ce_loss, time_signature_loss, program_loss,key_loss, tempo_loss,density_loss,occupation_loss,polyphony_loss,
                       pitch_register_loss,tensile_loss,diameter_loss]
 
         print_every = 100
 
-        learning_rate_adjust_interval = 1000
+        learning_rate_adjust_interval = 5000
         model.train()
 
         lowest_val = 1e9
@@ -717,42 +739,11 @@ def run(config, checkpoint_dir=None,run_id=None):
         lr = 0
         wandb.watch(model, criteria, log="all", log_freq=print_every)
         log_step = 0
+        scheduler_optim = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optim, patience=10, factor=0.5, min_lr=0.0000001, verbose=True)
         for epoch in range(start_epoch,config.epochs):
 
-            # after fourth epoch the eos weight is set to 1
-            if epoch == 3:
 
-                # ce_weight = torch.ones(vocab.vocab_size, device=device)
-
-
-                # if config['ce_loss_only'] is False:
-
-                ce_weight[1] = 1
-                ce_loss = nn.CrossEntropyLoss(ignore_index=0, weight=ce_weight,reduction='none')
-                ce_weight_all[1] = 1
-
-
-                if config['ce_loss_only']:
-                    tempo_weight[11:18] = config['control_token_weight']
-
-                    density_weight[170:180] = config['control_token_weight']
-
-                    occupation_weight[180:190] = config['control_token_weight']
-
-                    polyphony_weight[190:200] = config['control_token_weight']
-
-                    pitch_register_weight[200:210] = config['control_token_weight']
-
-
-                    tensile_weight[210:222] = config['control_token_weight']
-
-                    diameter_weight[222:234] = config['control_token_weight']
-
-                    ce_weight_all[11:18] = config['control_token_weight']
-                    ce_weight_all[170:234] = config['control_token_weight']
-
-            scheduler_optim = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optim, patience=10, factor=0.5, min_lr=0.0000001, verbose=True)
             # pbar = tqdm(total=print_every, leave=False)
 
             every_print_accuracy = {'total': 0,
@@ -760,21 +751,13 @@ def run(config, checkpoint_dir=None,run_id=None):
                                     'bar_control': 0}
             for token_type in set(vocab.token_class_ranges.values()):
                 every_print_accuracy[token_type] = 0
-            # every_print_accuracy = {'total': 0,
-            #                         'pitch': 0,
-            #                         'duration': 0,
-            #                         'structure': 0,
-            #                         'tempo': 0,
-            #                         'time_signature': 0,
-            #                         'control': 0,
-            #                         'program': 0,
-            #                         'eos': 0}
 
-            # Shuffle batches every epoch
-            # train_loader.dataset.shuffle_batches()
             example_ct = 0
             total_loss = 0
             ce_losses = 0
+            time_signature_losses = 0
+            program_losses = 0
+            key_losses = 0
             tempo_losses = 0
             density_losses = 0
             occupation_losses = 0
@@ -783,12 +766,7 @@ def run(config, checkpoint_dir=None,run_id=None):
             tensile_losses = 0
             diameter_losses = 0
 
-            # loss3 = density_loss(loss_input_1, loss_input_2)
-            # loss4 = occupation_loss(loss_input_1, loss_input_2)
-            # loss5 = polyphony_loss(loss_input_1, loss_input_2)
-            # loss6 = pitch_register_loss(loss_input_1, loss_input_2)
-            # loss7 = tensile_loss(loss_input_1, loss_input_2)
-            # loss8 = diameter_loss(loss_input_1, loss_input_2)
+
             for step, data in enumerate(train_data_loader):
                 total_step += 1
                 example_ct += len(data['input'])
@@ -822,14 +800,16 @@ def run(config, checkpoint_dir=None,run_id=None):
                 # loss_all_none = ce_loss_all_no_reduction(loss_input_1, loss_input_2)
                 loss1 = ce_loss(loss_input_1, loss_input_2)
                 loss1 = torch.sum(loss1) / ce_weight_all[loss_input_2].sum()
-
-                loss2 = tempo_loss(loss_input_1, loss_input_2)
-                loss3 = density_loss(loss_input_1, loss_input_2)
-                loss4 = occupation_loss(loss_input_1, loss_input_2)
-                loss5 = polyphony_loss(loss_input_1, loss_input_2)
-                loss6 = pitch_register_loss(loss_input_1, loss_input_2)
-                loss7 = tensile_loss(loss_input_1, loss_input_2)
-                loss8 = diameter_loss(loss_input_1, loss_input_2)
+                loss2 = time_signature_loss(loss_input_1, loss_input_2)
+                loss3 = program_loss(loss_input_1, loss_input_2)
+                loss4 = key_loss(loss_input_1, loss_input_2)
+                loss5 = tempo_loss(loss_input_1, loss_input_2)
+                loss6 = density_loss(loss_input_1, loss_input_2)
+                loss7 = occupation_loss(loss_input_1, loss_input_2)
+                loss8 = polyphony_loss(loss_input_1, loss_input_2)
+                loss9 = pitch_register_loss(loss_input_1, loss_input_2)
+                loss10 = tensile_loss(loss_input_1, loss_input_2)
+                loss11 = diameter_loss(loss_input_1, loss_input_2)
 
                 if config['ce_loss_only'] is True:
                     loss2 = torch.sum(loss2) / ce_weight_all[loss_input_2].sum()
@@ -839,35 +819,14 @@ def run(config, checkpoint_dir=None,run_id=None):
                     loss6 = torch.sum(loss6) / ce_weight_all[loss_input_2].sum()
                     loss7 = torch.sum(loss7) / ce_weight_all[loss_input_2].sum()
                     loss8 = torch.sum(loss8) / ce_weight_all[loss_input_2].sum()
+                    loss9 = torch.sum(loss9) / ce_weight_all[loss_input_2].sum()
+                    loss10 = torch.sum(loss10) / ce_weight_all[loss_input_2].sum()
+                    loss11 = torch.sum(loss11) / ce_weight_all[loss_input_2].sum()
 
 
                 loss = loss1 + loss2 + loss3 + loss4 + loss5 + loss6 + \
-                       loss7 + loss8
-                # if config['ce_loss_only'] is False:
-                #     loss2 = tempo_loss(loss_input_1, loss_input_2)
-                #     loss3 = density_loss(loss_input_1, loss_input_2)
-                #     loss4 = occupation_loss(loss_input_1, loss_input_2)
-                #     loss5 = polyphony_loss(loss_input_1, loss_input_2)
-                #     loss6 = pitch_register_loss(loss_input_1, loss_input_2)
-                #     loss7 = tensile_loss(loss_input_1, loss_input_2)
-                #     loss8 = diameter_loss(loss_input_1, loss_input_2)
-                #     loss = loss1 + loss2 + loss3 + loss4 + loss5 + loss6 + \
-                #            loss7 + loss8
-                # else:
-                #     loss = loss1
+                       loss7 + loss8 + loss9 + loss10 + loss11
 
-                # loss = ce_loss(loss_input_1, loss_input_2) + \
-                #     tempo_loss(loss_input_1, loss_input_2) + \
-                #     density_loss(loss_input_1, loss_input_2) + \
-                #     occupation_loss(loss_input_1, loss_input_2) + \
-                #     polyphony_loss(loss_input_1, loss_input_2) + \
-                #     pitch_register_loss(loss_input_1, loss_input_2) + \
-                #     tensile_loss(loss_input_1, loss_input_2) + \
-                #     diameter_loss(loss_input_1, loss_input_2)
-
-
-
-                # loss = ce_loss(rearrange(outputs, 'b t v -> (b t) v'), rearrange(tgt_out, 'b o -> (b o)')) +
 
                 # Backpropagate and update optim
                 loss.backward()
@@ -877,29 +836,23 @@ def run(config, checkpoint_dir=None,run_id=None):
 
                 total_loss += loss.item()
                 ce_losses += loss1.item()
-                tempo_losses += loss2.item()
-                density_losses += loss3.item()
-                occupation_losses += loss4.item()
-                polyphony_losses += loss5.item()
-                pitch_register_losses += loss6.item()
-                tensile_losses += loss7.item()
-                diameter_losses += loss8.item()
+                time_signature_losses += loss2.item()
+                program_losses += loss3.item()
+                key_losses += loss4.item()
+                tempo_losses += loss5.item()
+                density_losses += loss6.item()
+                occupation_losses += loss7.item()
+                polyphony_losses += loss8.item()
+                pitch_register_losses += loss9.item()
+                tensile_losses += loss10.item()
+                diameter_losses += loss11.item()
 
                 train_losses.append(loss.item())
-                # accuracies = accuracy(outputs,tgt_out,vocab)
-                # total_accuracy += accuracies['total']
 
-                # for key in train_accuracies.keys():
-                #     train_accuracies[key].append((step,accuracies[key]))
-
-                # logger.info(f'loss is {loss}')
-                # logger.info(f'total accuracy is {accuracies["total"]}')
-
-                # pbar.update(1)
                 if step % print_every == print_every - 1:
                     log_step += 1
-                    if step % learning_rate_adjust_interval == learning_rate_adjust_interval - 1:
-                        scheduler_optim.step(total_loss / print_every)
+                    # if step % learning_rate_adjust_interval == learning_rate_adjust_interval - 1:
+                    #     scheduler_optim.step(total_loss / print_every)
                     # pbar.close()
                     times = int((step / (print_every - 1)))
 
@@ -915,43 +868,20 @@ def run(config, checkpoint_dir=None,run_id=None):
                     for token_type in accuracies.keys():
                         every_print_accuracy[token_type] += accuracies[token_type]
 
-                    # logger.info(f'loss is {loss}')
-                    # logger.info(f'total accuracy is {accuracies["total"]}')
-
-                    # if config['ce_loss_only'] is False:
-                    #     wandb.log({"epoch": epoch,
-                    #                "train_loss":loss,
-                    #                "ce_loss": loss1,
-                    #                "tempo_loss":loss2,
-                    #                "density_loss":loss3,
-                    #                "occupation_loss":loss4,
-                    #                "polyphony_loss":loss5,
-                    #                "pitch_register_loss":loss6,
-                    #                "tensile_loss":loss7,
-                    #                "diameter_loss":loss8,
-                    #                "total_accuracy": every_print_accuracy["total"] / times,
-                    #                "lr":optim.param_groups[0]['lr'],
-                    #                "real_batch_num":example_ct,
-                    #                },step=log_step)
-                    # else:
-                    #     wandb.log({"epoch": epoch,
-                    #                "train_loss": loss,
-                    #                "ce_loss": loss1,
-                    #                "total_accuracy": every_print_accuracy["total"] / times,
-                    #                "lr":optim.param_groups[0]['lr'],
-                    #                "real_batch_num": example_ct,
-                    #                },step=log_step)
 
                     wandb.log({"epoch": epoch,
                               "train_loss":loss,
                               "ce_loss": loss1,
-                              "tempo_loss":loss2,
-                              "density_loss":loss3,
-                              "occupation_loss":loss4,
-                              "polyphony_loss":loss5,
-                              "pitch_register_loss":loss6,
-                              "tensile_loss":loss7,
-                              "diameter_loss":loss8,
+                              "time_signature_loss":loss2,
+                              "program_loss":loss3,
+                              "key_loss":loss4,
+                              "tempo_loss": loss5,
+                              "density_loss": loss6,
+                              "occupation_loss": loss7,
+                              "polyphony_loss":loss8,
+                              "pitch_register_loss":loss9,
+                              "tensile_loss":loss10,
+                              "diameter_loss":loss11,
                               "total_accuracy": every_print_accuracy["total"] / times,
                               "lr":optim.param_groups[0]['lr'],
                               "real_batch_num":example_ct,
@@ -961,6 +891,9 @@ def run(config, checkpoint_dir=None,run_id=None):
                                 train loss: {total_loss / print_every} \n \
                                 total accuracy: {every_print_accuracy["total"] / times} \n \
                                 ce loss: {ce_losses / print_every} \n \
+                                time signature loss: {time_signature_losses / print_every} \n \
+                                 program loss : {program_losses / print_every} \n \
+                                key loss: {key_losses / print_every}\n \
                                 tempo loss: {tempo_losses / print_every} \n \
                                 density loss : {density_losses / print_every} \n \
                                 occupation loss: {occupation_losses / print_every}\n \
@@ -976,37 +909,6 @@ def run(config, checkpoint_dir=None,run_id=None):
                     for token_type in every_print_accuracy.keys():
                         logger.debug(f'{token_type} accuracy is {every_print_accuracy[token_type] / times}')
 
-
-                    #
-                    # logger.info(f'Epoch [{epoch + 1} / {num_epochs}] \t Step [{step + 1} / {len(train_data_loader)}] \n \
-                    #             data number {example_ct} \n \
-                    #             Train Loss: {total_loss / print_every} \n Total accuracy: {every_print_accuracy["total"] / times} \n')
-
-                    # if lr != optim.param_groups[0]['lr']:
-                    #     lr = optim.param_groups[0]['lr']
-                    #     logger.info(f'learning rate is {lr}')
-
-                    # if config['loss_num'] == 1:
-                    #     print(f'ce loss is {loss1}')
-                    #     print(f'tempo loss is {loss2}')
-                    #     print(f'density loss is {loss3}')
-                    #     print(f'occupation loss is {loss4}')
-                    #     print(f'polyphony loss is {loss5}')
-                    #     print(f'pitch_register loss is {loss6}')
-                    #     print(f'tensile loss is {loss7}')
-                    #     print(f'diameter loss is {loss8}')
-                    # structure accuracy : {every_print_accuracy["structure"] / times} \n \
-                    # duration accuracy : {every_print_accuracy["duration"] / times} \n \
-                    # pitch accuracy : {every_print_accuracy["pitch"] / times} \n \
-                    # track control accuracy : {every_print_accuracy["track_control"] / times} \n \
-                    # bar control accuracy : {every_print_accuracy["bar_control"] / times} \n')
-                    # f'program accuracy : {every_print_accuracy["program"] / times} \n'
-                    # f'eos accuracy : {every_print_accuracy["eos"] / times} \n',
-                    # # f'tempo accuracy : {every_print_accuracy["tempo"] / times} \n'
-                    # # f'time signature accuracy : {every_print_accuracy["time_signature"] / times} \n'
-
-                    #
-                    # )
                     for token_type in every_print_accuracy.keys():
                         wandb.log({f'{token_type}_acc': every_print_accuracy[token_type] / times,
                                   'real_batch_num': example_ct,
@@ -1014,6 +916,9 @@ def run(config, checkpoint_dir=None,run_id=None):
 
                     total_loss = 0
                     ce_losses = 0
+                    time_signature_losses = 0
+                    program_losses = 0
+                    key_losses = 0
                     tempo_losses = 0
                     density_losses = 0
                     occupation_losses = 0
@@ -1053,6 +958,7 @@ def run(config, checkpoint_dir=None,run_id=None):
                 logger.info(f'ave_epoch_train_{token_type}_acc is {train_accuracies[token_type]}')
 
             average_train_loss = np.mean(train_losses)
+            scheduler_optim.step(average_train_loss)
 
             wandb.log({
                         'ave_epoch_train_loss': average_train_loss,
@@ -1066,11 +972,12 @@ def run(config, checkpoint_dir=None,run_id=None):
             # Validate every epoch
             # pbar.close()
             logger.info(f'valid data size is {len(valid_data_loader)}')
-            val_loss, val_accuracy = validate(valid_data_loader, model, config, ce_weight_all, ce_loss,tempo_loss,density_loss,occupation_loss,polyphony_loss,pitch_register_loss,tensile_loss,diameter_loss, device, vocab, logger)
+            val_loss, val_accuracy = validate(valid_data_loader, model, config, ce_weight_all, ce_loss,time_signature_loss,program_loss,key_loss,tempo_loss,density_loss,occupation_loss,polyphony_loss,pitch_register_loss,tensile_loss,diameter_loss, device, vocab, logger)
 
             for key in val_loss.keys():
                 if key in ['total','ce_loss','density','occupation','polyphony',
-                           'pitch_register','tensile','diameter','tempo']:
+                           'pitch_register','tensile','diameter','tempo','time_signature',
+                           'key','program']:
                     wandb.log({f'val_{key}_loss': val_loss[key],
                                'epoch_metrics_step': epoch},step=log_step)
                     logger.info(f'validation {key} loss is {val_loss[key]}')
@@ -1163,7 +1070,7 @@ def accuracy(outputs, targets, vocab):
 
                 target_idx = targets[i][position].item()
                 target_token = vocab.index2char(target_idx)
-
+                # log the first one to print
                 if i == 0:
                     generated_output.append(output_token)
                     target_output.append(target_token)
@@ -1207,7 +1114,7 @@ def accuracy(outputs, targets, vocab):
 
 
 
-def validate(valid_loader, model,config, ce_weight_all,ce_loss,tempo_loss,density_loss,occupation_loss,polyphony_loss,pitch_register_loss,tensile_loss,diameter_loss, device, vocab, logger):
+def validate(valid_loader, model,config, ce_weight_all,ce_loss,time_signature_loss, program_loss, key_loss,tempo_loss,density_loss,occupation_loss,polyphony_loss,pitch_register_loss,tensile_loss,diameter_loss, device, vocab, logger):
     # pbar = tqdm(total=len(iter(valid_loader)), leave=False)
     model.eval()
 
@@ -1270,13 +1177,16 @@ def validate(valid_loader, model,config, ce_weight_all,ce_loss,tempo_loss,densit
 
             loss1 = ce_loss(loss_input_1, loss_input_2)
             loss1 = torch.sum(loss1) / ce_weight_all[loss_input_2].sum()
-            loss2 = tempo_loss(loss_input_1, loss_input_2)
-            loss3 = density_loss(loss_input_1, loss_input_2)
-            loss4 = occupation_loss(loss_input_1, loss_input_2)
-            loss5 = polyphony_loss(loss_input_1, loss_input_2)
-            loss6 = pitch_register_loss(loss_input_1, loss_input_2)
-            loss7 = tensile_loss(loss_input_1, loss_input_2)
-            loss8 = diameter_loss(loss_input_1, loss_input_2)
+            loss2 = time_signature_loss(loss_input_1, loss_input_2)
+            loss3 = program_loss(loss_input_1, loss_input_2)
+            loss4 = key_loss(loss_input_1, loss_input_2)
+            loss5 = tempo_loss(loss_input_1, loss_input_2)
+            loss6 = density_loss(loss_input_1, loss_input_2)
+            loss7 = occupation_loss(loss_input_1, loss_input_2)
+            loss8 = polyphony_loss(loss_input_1, loss_input_2)
+            loss9 = pitch_register_loss(loss_input_1, loss_input_2)
+            loss10 = tensile_loss(loss_input_1, loss_input_2)
+            loss11 = diameter_loss(loss_input_1, loss_input_2)
 
             if config['ce_loss_only'] is True:
                 loss2 = torch.sum(loss2) / ce_weight_all[loss_input_2].sum()
@@ -1286,72 +1196,33 @@ def validate(valid_loader, model,config, ce_weight_all,ce_loss,tempo_loss,densit
                 loss6 = torch.sum(loss6) / ce_weight_all[loss_input_2].sum()
                 loss7 = torch.sum(loss7) / ce_weight_all[loss_input_2].sum()
                 loss8 = torch.sum(loss8) / ce_weight_all[loss_input_2].sum()
+                loss9 = torch.sum(loss9) / ce_weight_all[loss_input_2].sum()
+                loss10 = torch.sum(loss10) / ce_weight_all[loss_input_2].sum()
+                loss11 = torch.sum(loss11) / ce_weight_all[loss_input_2].sum()
 
             loss = loss1 + loss2 + loss3 + loss4 + loss5 + loss6 + \
-                   loss7 + loss8
+                       loss7 + loss8 + loss9 + loss10 + loss11
 
 
-            # if config['ce_loss_only'] is False:
-            #     loss2 = tempo_loss(loss_input_1, loss_input_2)
-            #     loss3 = density_loss(loss_input_1, loss_input_2)
-            #     loss4 = occupation_loss(loss_input_1, loss_input_2)
-            #     loss5 = polyphony_loss(loss_input_1, loss_input_2)
-            #     loss6 = pitch_register_loss(loss_input_1, loss_input_2)
-            #     loss7 = tensile_loss(loss_input_1, loss_input_2)
-            #     loss8 = diameter_loss(loss_input_1, loss_input_2)
-            #     loss = loss1 + loss2 + loss3 + loss4 + loss5 + loss6 + \
-            #            loss7 + loss8
-            # else:
-            #     loss = loss1
-
-            # if config['loss_num'] == 1:
-            #     print(f'ce loss is {loss1}')
-            #     print(f'tempo loss is {loss2}')
-            #     print(f'density loss is {loss3}')
-            #     print(f'occupation loss is {loss4}')
-            #     print(f'polyphony loss is {loss5}')
-            #     print(f'pitch_register loss is {loss6}')
-            #     print(f'tensile loss is {loss7}')
-            #     print(f'diameter loss is {loss8}')
 
             total_loss['total'] += loss.item()
-
-            # if config['ce_loss_only'] is False:
             total_loss['ce_loss'] += loss1.item()
-            total_loss['tempo'] += loss2.item()
-            total_loss['density'] += loss3.item()
-            total_loss['occupation'] += loss4.item()
-            total_loss['polyphony'] += loss5.item()
-            total_loss['pitch_register'] += loss6.item()
-            total_loss['tensile'] += loss7.item()
-            total_loss['diameter'] += loss8.item()
+            total_loss['time_signature'] += loss2.item()
+            total_loss['program'] += loss3.item()
+            total_loss['key'] += loss4.item()
+            total_loss['tempo'] += loss5.item()
+            total_loss['density'] += loss6.item()
+            total_loss['occupation'] += loss7.item()
+            total_loss['polyphony'] += loss8.item()
+            total_loss['pitch_register'] += loss9.item()
+            total_loss['tensile'] += loss10.item()
+            total_loss['diameter'] += loss11.item()
 
             accuracies, generated_output, target_output = accuracy(outputs, tgt_out, vocab)
 
             for token_type in total_accuracy.keys():
                 total_accuracy[token_type] += accuracies[token_type]
-            # total_accuracy['total'] += accuracies['total']
-            # total_accuracy['pitch'] += accuracies['pitch']
-            # total_accuracy['duration'] += accuracies['duration']
-            # total_accuracy['structure'] += accuracies['structure']
-            # total_accuracy['tempo'] += accuracies['tempo']
-            # total_accuracy['time_signature'] += accuracies['time_signature']
-            # total_accuracy['program'] += accuracies['program']
-            # total_accuracy['eos'] += accuracies['eos']
-            # total_accuracy['track_control'] += accuracies['track_control']
-            # total_accuracy['bar_control'] += accuracies['bar_control']
-            # total_accuracy['density'] += accuracies['density']
-            # total_accuracy['polyphony'] += accuracies['polyphony']
-            # total_accuracy['occupation'] += accuracies['occupation']
-            # total_accuracy['pitch_register'] += accuracies['pitch_register']
-            # total_accuracy['tensile'] += accuracies['tensile']
-            # total_accuracy['diameter'] += accuracies['diameter']
-            # total_accuracy['key'] += accuracies['key']
 
-            # lr = optim.get_lr()
-
-            # logger.info(f'loss is {loss}')
-            # logger.info(f'total accuracy is {accuracies["total"]}')
 
     for key in total_loss.keys():
         total_loss[key] /= total_steps

@@ -2,13 +2,18 @@ import random
 import torch
 import gc
 from torch.utils.data import Dataset
-from preprocessing import event_2midi
+from preprocessing import event_2midi,midi_2event
+from preprocessing import remove_control_event
+from preprocessing import remove_empty_track
 from einops import rearrange
 import re
 import json
 import os
 from vocab import *
 import sys
+import tension_calculation
+from joblib import Parallel, delayed
+
 
 class ParallelLanguageDataset(Dataset):
     def __init__(self, event_folder,
@@ -28,6 +33,7 @@ class ParallelLanguageDataset(Dataset):
                  mask_track_num_ratio,
                  mask_bar_ctrl_token=False,
                  pretraining=True,
+                 fine_tune_prediction=False,
                  train_jointly=True,
                  verbose=False
                  ):
@@ -70,7 +76,7 @@ class ParallelLanguageDataset(Dataset):
         self.span_lengths = span_lengths
         self.span_ratio_jointly = span_ratio_jointly
         self.span_ratio_separately_each_epoch = span_ratio_separately_each_epoch
-        self.train_jointly = train_jointly
+
         self.epoch = 0
         self.previous_index = 0
         self.mask_bar_num_ratio = mask_bar_num_ratio,
@@ -78,14 +84,18 @@ class ParallelLanguageDataset(Dataset):
         self.mask_bar_ctrl_token = mask_bar_ctrl_token,
         self.train_jointly = train_jointly
         self.pretraining = pretraining
+        self.fine_tuning_prediction = fine_tune_prediction
 
         print(f'pretraining is {self.pretraining}')
         if self.pretraining:
             print(f'control mask ratio is {self.control_mask_ratio}')
         else:
-            print(f'mask_bar_num_ratio is {self.mask_bar_num_ratio}')
-            print(f'mask_track_num_ratio is {self.mask_track_num_ratio}')
-            print(f'mask_bar_ctrl_token is {self.mask_bar_ctrl_token}')
+            if self.fine_tuning_prediction:
+                print("mask track control tokens")
+            else:
+                print(f'mask_bar_num_ratio is {self.mask_bar_num_ratio}')
+                print(f'mask_track_num_ratio is {self.mask_track_num_ratio}')
+                print(f'mask_bar_ctrl_token is {self.mask_bar_ctrl_token}')
 
 
 
@@ -122,11 +132,26 @@ class ParallelLanguageDataset(Dataset):
                                                                         self.span_ratio_jointly,
                                                                         self.span_ratio_separately_each_epoch,
                                                                         self.epoch,
-                                                                        self.train_jointly)
+                                                                        self.train_jointly
+                                                                        )
+
+        # elif self.fine_tuning_prediction:
+        #     masked_input, decoder_in, decoder_target = self.mask_category(event,control_tokens,3)
+        #
+        # else:
+        #     masked_input, decoder_in, decoder_target = self.mask_bars(event,bar_ratio=self.mask_bar_num_ratio[0],
+        #                                                             track_ratio=self.mask_track_num_ratio[0],
+        #                                                             mask_bar_ctr=self.mask_bar_ctrl_token[0])
+        #
         else:
-            masked_input, decoder_in, decoder_target = self.mask_bars(event,bar_ratio=self.mask_bar_num_ratio[0],
-                                                                    track_ratio=self.mask_track_num_ratio[0],
-                                                                    mask_bar_ctr=self.mask_bar_ctrl_token[0])
+            if random.random() > 0.5:
+                masked_input, decoder_in, decoder_target = self.mask_category(event,all_meta_tokens)
+
+            else:
+                masked_input, decoder_in, decoder_target = self.mask_bars(event,bar_ratio=self.mask_bar_num_ratio[0],
+                                                                        track_ratio=self.mask_track_num_ratio[0],
+                                                                        mask_bar_ctr=self.mask_bar_ctrl_token[0])
+
 
 
         # masked_input, decoder_in, decoder_target = self.mask_category(event,
@@ -173,32 +198,33 @@ class ParallelLanguageDataset(Dataset):
                 file_events = file_events[:bar_pos[-1]]
                 bar_pos = bar_pos[:-1]
 
-            events_with_control,keys = add_control_event(file_events, bar_pos, tensiles, diameters,keys)
+            result = add_control_event(file_events, bar_pos, tensiles, diameters,keys)
+            if result:
+                events_with_control, keys = result
+                bar_pos = np.where(events_with_control == 'bar')[0]
+                # total_bars = min(len(tensiles), len(diameters), len(bar_pos))
+                # bar_pos = bar_pos[:total_bars]
 
-            bar_pos = np.where(events_with_control == 'bar')[0]
-            # total_bars = min(len(tensiles), len(diameters), len(bar_pos))
-            # bar_pos = bar_pos[:total_bars]
+                bar_beginning_pos = bar_pos[::batch_window_size]
 
-            bar_beginning_pos = bar_pos[::batch_window_size]
+                meta_events = events_with_control[1:np.where('track_0' == events_with_control)[0][0]-2]
 
-            meta_events = events_with_control[1:np.where('track_0' == events_with_control)[0][0]-2]
+                for pos in range(len(bar_beginning_pos) - 1):
 
-            for pos in range(len(bar_beginning_pos) - 1):
-
-                # print(bar_beginning_pos[pos])
-                if keys[2] != -1 and pos*8+1 >= keys[2]:
-                    meta_events[2] = key_to_token[keys[3]]
-                if pos == len(bar_beginning_pos) - 2:
-                    # skip the last one
-                    # continue
-                    # return_events = file_events[bar_beginning_pos[pos]:]
-                    return_events = np.insert(events_with_control[bar_beginning_pos[pos]:], 1, meta_events)
-                elif pos > 0:
-                    return_events = np.insert(events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]], 1,
-                                              meta_events)
-                else:
-                    return_events = events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]]
-                batches.append(return_events.tolist())
+                    # print(bar_beginning_pos[pos])
+                    if keys[2] != -1 and pos*8+1 >= keys[2]:
+                        meta_events[2] = key_to_token[keys[3]]
+                    if pos == len(bar_beginning_pos) - 2 and pos != 0:
+                        # skip the last one
+                        # continue
+                        # return_events = file_events[bar_beginning_pos[pos]:]
+                        return_events = np.insert(events_with_control[bar_beginning_pos[pos]:], 1, meta_events)
+                    elif pos > 0:
+                        return_events = np.insert(events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]], 1,
+                                                  meta_events)
+                    else:
+                        return_events = events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]]
+                    batches.append(return_events.tolist())
         batches.sort(key=len)
         i = 0
         while i < len(batches) - 1:
@@ -307,194 +333,141 @@ class ParallelLanguageDataset(Dataset):
             masked_num = 0
             # bar_pos = np.where(np.array(event) == 'bar')[0]
 
+
             # print(len(event))
-            if self.epoch < -1:
-                while total_masked_ratio < total_ratio and start_pos < len(event):
-                    masked_token = []
-                    prob = random.random()
+            # if self.epoch < -1:
+            #     while total_masked_ratio < total_ratio and start_pos < len(event):
+            #         masked_token = []
+            #         prob = random.random()
+            #
+            #
+            #         if prob < random_threshold:
+            #             prob /= random_threshold
+            #
+            #             if prob < span_ratio[0]:
+            #                 if start_pos + span_lengths[0] <= len(event):
+            #                     masked_token = event[start_pos:start_pos + span_lengths[0]]
+            #                     tokens.append(self.vocab.mask_indices[masked_num])
+            #                     total_masked_ratio += span_lengths[0] / len(event)
+            #                     start_pos += span_lengths[0]
+            #             elif span_ratio[0] < prob < span_ratio[1] + span_ratio[0]:
+            #                 if start_pos + span_lengths[1] <= len(event):
+            #                     masked_token = event[start_pos:start_pos + span_lengths[1]]
+            #                     tokens.append(self.vocab.mask_indices[masked_num])
+            #                     total_masked_ratio += span_lengths[1] / len(event)
+            #                     start_pos += span_lengths[1]
+            #             else:
+            #                 if start_pos + span_lengths[2] <= len(event):
+            #                     masked_token = event[start_pos:start_pos + span_lengths[2]]
+            #                     tokens.append(self.vocab.mask_indices[masked_num])
+            #                     total_masked_ratio += span_lengths[2] / len(event)
+            #                     start_pos += span_lengths[2]
+            #
+            #             if len(masked_token) > 0:
+            #                 if not isinstance(masked_token, list):
+            #                     masked_token = [masked_token]
+            #                 decoder_in.append(self.vocab.mask_indices[masked_num])
+            #                 for token in masked_token:
+            #                     decoder_in.append(self.vocab.char2index(token))
+            #                     decoder_target.append(self.vocab.char2index(token))
+            #                 else:
+            #                     decoder_target.append(self.vocab.eos_index)
+            #
+            #         else:
+            #             tokens.append(self.vocab.char2index(event[start_pos]))
+            #             start_pos += 1
+            # else:
+            for token in event:
+                if self.vocab.char2index(token) in self.vocab.control_indices:
+                    total_control_tokens += 1
 
-
-                    if prob < random_threshold:
-                        prob /= random_threshold
-
-                        if prob < span_ratio[0]:
-                            if start_pos + span_lengths[0] <= len(event):
+            while total_masked_ratio < total_ratio and start_pos < len(event) and control_masked_ratio['total'] < self.control_mask_ratio:
+                masked_token = []
+                prob = random.random()
+                have_control_token = False
+                control_token_length = 0
+                if prob < span_ratio[0]:
+                    if start_pos + span_lengths[0] <= len(event):
+                        for event_token in event[start_pos:start_pos + 1]:
+                            if self.vocab.char2index(event_token) in self.vocab.control_indices:
+                                have_control_token = True
+                                control_token_length += 1
+                        # all the control token mask span length = 1
+                        if have_control_token:
+                            prob = random.random()
+                            if prob < self.control_mask_ratio:
+                                masked_token = event[start_pos:start_pos + 1]
+                                tokens.append(self.vocab.mask_indices[masked_num])
+                                total_masked_ratio += 1 / len(event)
+                                control_masked_ratio['total'] += control_token_length / total_control_tokens
+                                start_pos += 1
+                        else:
+                            prob = random.random()
+                            if prob < random_threshold * 1.5:
                                 masked_token = event[start_pos:start_pos + span_lengths[0]]
                                 tokens.append(self.vocab.mask_indices[masked_num])
                                 total_masked_ratio += span_lengths[0] / len(event)
                                 start_pos += span_lengths[0]
-                        elif span_ratio[0] < prob < span_ratio[1] + span_ratio[0]:
-                            if start_pos + span_lengths[1] <= len(event):
+
+                elif span_ratio[0] < prob < span_ratio[1] + span_ratio[0]:
+                    if start_pos + span_lengths[1] <= len(event):
+                        for event_token in event[start_pos:start_pos + 1]:
+                            if self.vocab.char2index(event_token) in self.vocab.control_indices:
+                                have_control_token = True
+                                control_token_length += 1
+
+                        if have_control_token:
+                            prob = random.random()
+                            if prob < self.control_mask_ratio:
+                                masked_token = event[start_pos:start_pos + 1]
+                                tokens.append(self.vocab.mask_indices[masked_num])
+                                control_masked_ratio['total'] += control_token_length / total_control_tokens
+                                total_masked_ratio += 1 / len(event)
+                                start_pos += 1
+                        else:
+                            prob = random.random()
+                            if prob < random_threshold * 1.5:
                                 masked_token = event[start_pos:start_pos + span_lengths[1]]
                                 tokens.append(self.vocab.mask_indices[masked_num])
                                 total_masked_ratio += span_lengths[1] / len(event)
                                 start_pos += span_lengths[1]
+                else:
+                    if start_pos + span_lengths[2] <= len(event):
+                        for event_token in event[start_pos:start_pos + 1]:
+                            if self.vocab.char2index(event_token) in self.vocab.control_indices:
+                                have_control_token = True
+                                control_token_length += 1
+
+                        if have_control_token:
+                            prob = random.random()
+                            if prob < self.control_mask_ratio:
+                                masked_token = event[start_pos:start_pos + 1]
+                                tokens.append(self.vocab.mask_indices[masked_num])
+                                control_masked_ratio['total'] += control_token_length / total_control_tokens
+                                total_masked_ratio += 1 / len(event)
+                                start_pos += 1
                         else:
-                            if start_pos + span_lengths[2] <= len(event):
+                            prob = random.random()
+                            if prob < random_threshold * 1.5:
                                 masked_token = event[start_pos:start_pos + span_lengths[2]]
                                 tokens.append(self.vocab.mask_indices[masked_num])
                                 total_masked_ratio += span_lengths[2] / len(event)
                                 start_pos += span_lengths[2]
 
-                        if len(masked_token) > 0:
-                            if not isinstance(masked_token, list):
-                                masked_token = [masked_token]
-                            decoder_in.append(self.vocab.mask_indices[masked_num])
-                            for token in masked_token:
-                                decoder_in.append(self.vocab.char2index(token))
-                                decoder_target.append(self.vocab.char2index(token))
-                            else:
-                                decoder_target.append(self.vocab.eos_index)
-
+                if len(masked_token) > 0:
+                    if not isinstance(masked_token, list):
+                        masked_token = [masked_token]
+                    decoder_in.append(self.vocab.mask_indices[masked_num])
+                    for token in masked_token:
+                        decoder_in.append(self.vocab.char2index(token))
+                        decoder_target.append(self.vocab.char2index(token))
                     else:
-                        tokens.append(self.vocab.char2index(event[start_pos]))
-                        start_pos += 1
-            else:
-                for token in event:
-                    if self.vocab.char2index(token) in self.vocab.control_indices:
-                        total_control_tokens += 1
+                        decoder_target.append(self.vocab.eos_index)
 
-                while total_masked_ratio < total_ratio and start_pos < len(event) and control_masked_ratio['total'] < self.control_mask_ratio:
-                    masked_token = []
-                    prob = random.random()
-                    have_control_token = False
-                    control_token_length = 0
-                    if prob < span_ratio[0]:
-                        if start_pos + span_lengths[0] <= len(event):
-                            for event_token in event[start_pos:start_pos + 1]:
-                                if self.vocab.char2index(event_token) in self.vocab.control_indices:
-                                    have_control_token = True
-                                    control_token_length += 1
+                else:
+                    tokens.append(self.vocab.char2index(event[start_pos]))
+                    start_pos += 1
 
-
-                            # all the control token mask span length = 1
-                            if have_control_token:
-                                prob = random.random()
-                                if prob < self.control_mask_ratio:
-                                    masked_token = event[start_pos:start_pos + 1]
-                                    tokens.append(self.vocab.mask_indices[masked_num])
-                                    total_masked_ratio += 1 / len(event)
-                                    control_masked_ratio['total'] += control_token_length / total_control_tokens
-                                    start_pos += 1
-                            else:
-                                prob = random.random()
-                                if prob < random_threshold * 1.5:
-                                    masked_token = event[start_pos:start_pos + span_lengths[0]]
-                                    tokens.append(self.vocab.mask_indices[masked_num])
-                                    total_masked_ratio += span_lengths[0] / len(event)
-                                    start_pos += span_lengths[0]
-
-                    elif span_ratio[0] < prob < span_ratio[1] + span_ratio[0]:
-                        if start_pos + span_lengths[1] <= len(event):
-                            for event_token in event[start_pos:start_pos + 1]:
-                                if self.vocab.char2index(event_token) in self.vocab.control_indices:
-                                    have_control_token = True
-                                    control_token_length += 1
-
-                            if have_control_token:
-                                prob = random.random()
-                                if prob < self.control_mask_ratio:
-                                    masked_token = event[start_pos:start_pos + 1]
-                                    tokens.append(self.vocab.mask_indices[masked_num])
-                                    control_masked_ratio['total'] += control_token_length / total_control_tokens
-                                    total_masked_ratio += 1 / len(event)
-                                    start_pos += 1
-                            else:
-                                prob = random.random()
-                                if prob < random_threshold * 1.5:
-                                    masked_token = event[start_pos:start_pos + span_lengths[1]]
-                                    tokens.append(self.vocab.mask_indices[masked_num])
-                                    total_masked_ratio += span_lengths[1] / len(event)
-                                    start_pos += span_lengths[1]
-                    else:
-                        if start_pos + span_lengths[2] <= len(event):
-                            for event_token in event[start_pos:start_pos + 1]:
-                                if self.vocab.char2index(event_token) in self.vocab.control_indices:
-                                    have_control_token = True
-                                    control_token_length += 1
-
-                            if have_control_token:
-                                prob = random.random()
-                                if prob < self.control_mask_ratio:
-                                    masked_token = event[start_pos:start_pos + 1]
-                                    tokens.append(self.vocab.mask_indices[masked_num])
-                                    control_masked_ratio['total'] += control_token_length / total_control_tokens
-                                    total_masked_ratio += 1 / len(event)
-                                    start_pos += 1
-                            else:
-                                prob = random.random()
-                                if prob < random_threshold * 1.5:
-                                    masked_token = event[start_pos:start_pos + span_lengths[2]]
-                                    tokens.append(self.vocab.mask_indices[masked_num])
-                                    total_masked_ratio += span_lengths[2] / len(event)
-                                    start_pos += span_lengths[2]
-
-                    if len(masked_token) > 0:
-                        if not isinstance(masked_token, list):
-                            masked_token = [masked_token]
-                        decoder_in.append(self.vocab.mask_indices[masked_num])
-                        for token in masked_token:
-                            decoder_in.append(self.vocab.char2index(token))
-                            decoder_target.append(self.vocab.char2index(token))
-                        else:
-                            decoder_target.append(self.vocab.eos_index)
-
-                    else:
-                        tokens.append(self.vocab.char2index(event[start_pos]))
-                        start_pos += 1
-
-            # current_track_unmasked = True
-            #
-            # current_track = 0
-            # unmasked = True
-
-            # while total_masked_ratio < self.total_mask_ratio and start_pos < len(event):
-            #
-            #     prob = random.random()
-            #
-            #     # add track selection
-            #     # if event[start_pos] == 'track_0':
-            #     #     current_track = 0
-            #     #     current_track_unmasked = True
-            #     # if event[start_pos] == 'track_1':
-            #     #     current_track = 1
-            #     #     current_track_unmasked = True
-            #     # if event[start_pos] == 'track_2':
-            #     #     current_track = 2
-            #     #     current_track_unmasked = True
-            #
-            #
-            #     for i, token_type in enumerate(token_types):
-            #         if event[start_pos] in token_type:
-            #             # current_track_unmasked and current_track == 0
-            #             if prob < ratios[i]:
-            #
-            #                 masked_token = event[start_pos]
-            #                 tokens.append(self.vocab.mask_indices[masked_num])
-            #                 total_masked_ratio += 1 / len(event)
-            #                 start_pos += 1
-            #
-            #                 if len(masked_token) > 0:
-            #                     if not isinstance(masked_token, list):
-            #                         masked_token = [masked_token]
-            #                     decoder_in.append(self.vocab.mask_indices[masked_num])
-            #                     for token in masked_token:
-            #                         decoder_in.append(self.vocab.char2index(token))
-            #                         decoder_target.append(self.vocab.char2index(token))
-            #                     else:
-            #                         decoder_target.append(self.vocab.eos_index)
-            #
-            #
-            #                     # current_track_unmasked = False
-            #                     # masked_num += 1
-            #
-            #                     # unmasked  = False
-            #                     break
-            #
-            #             else:
-            #                 tokens.append(self.vocab.char2index(event[start_pos]))
-            #                 start_pos += 1
-            #                 break
 
             while start_pos < len(event):
                 tokens.append(self.vocab.char2index(event[start_pos]))
@@ -523,7 +496,7 @@ class ParallelLanguageDataset(Dataset):
         # print(len(output_label) - len(np.where(output_label==2)[0])*2)
         return total_tokens, total_decoder_in, total_decoder_target
 
-    def mask_category(self,events, token_type, number):
+    def mask_category(self, events, token_type):
 
         total_tokens = []
         total_decoder_in = []
@@ -538,78 +511,42 @@ class ParallelLanguageDataset(Dataset):
             total_masked_ratio = 0
             masked_num = 0
             in_event = False
-            previous_pos = 0
-            while total_masked_ratio < self.total_mask_ratio and start_pos < len(event):
+            token_type_pos = []
 
+            for pos,token in enumerate(event):
+                if token in token_type:
+                    token_type_pos.append(pos)
 
-                # add track selection
-                # if event[start_pos] == 'track_0':
-                #     current_track = 0
-                #     current_track_unmasked = True
-                # if event[start_pos] == 'track_1':
-                #     current_track = 1
-                #     current_track_unmasked = True
-                # if event[start_pos] == 'track_2':
-                #     current_track = 2
-                #     current_track_unmasked = True
+            # mask_number = np.random.randint(1,number+1)
 
-                if self.vocab.token_class_ranges[self.vocab.char2index(event[start_pos])] == token_type:
+            # mask_pos = np.random.choice(token_type_pos,mask_number)
+            # mask_pos = np.random.choice(token_type_pos, len(token_type_pos))
 
-                    if masked_num < number:
-                        if in_event is False:
-                            masked_token = [event[start_pos]]
-                            tokens.append(self.vocab.mask_indices[0])
-                            in_event = True
-                            prevous_pos = start_pos
-                        else:
-                            masked_token.append(event[start_pos])
-
-                        masked_num += 1
-                        total_masked_ratio += 1 / len(event)
-                        start_pos += 1
-
-
-                    else:
-                        if in_event:
-                            decoder_in.append(self.vocab.mask_indices[0])
-                            for token in masked_token:
-                                decoder_in.append(self.vocab.char2index(token))
-                                decoder_target.append(self.vocab.char2index(token))
-                            else:
-                                decoder_target.append(self.vocab.eos_index)
-                            in_event = False
-                        tokens.append(self.vocab.char2index(event[start_pos]))
-                        start_pos += 1
-
-
-
-                else:
-                    if in_event:
-                        decoder_in.append(self.vocab.mask_indices[0])
-                        for token in masked_token:
-                            decoder_in.append(self.vocab.char2index(token))
-                            decoder_target.append(self.vocab.char2index(token))
-                        else:
-                            decoder_target.append(self.vocab.eos_index)
-                        in_event = False
-                    tokens.append(self.vocab.char2index(event[start_pos]))
-                    start_pos += 1
 
             while start_pos < len(event):
-                tokens.append(self.vocab.char2index(event[start_pos]))
+
+                if start_pos in token_type_pos and random.random() > 0.5:
+
+                    masked_token = event[start_pos]
+                    tokens.append(self.vocab.mask_indices[0])
+
+                    decoder_target.append(self.vocab.char2index(masked_token))
+                    decoder_target.append(self.vocab.eos_index)
+
+                    decoder_in.append(self.vocab.mask_indices[0])
+                    decoder_in.append(self.vocab.char2index(masked_token))
+
+                    masked_num += 1
+                else:
+                    tokens.append(self.vocab.char2index(event[start_pos]))
                 start_pos += 1
+
 
             tokens = np.array(tokens)
             if len(decoder_in) > 0:
                 decoder_in = np.array(decoder_in)
                 decoder_target = np.array(decoder_target)
-                # print('\n')
-                # print(f'event length is {len(event)}')
-                # print(f'tokens length is {len(tokens)}')
-                # print(f'masked num is {masked_num}')
-                # print(f'decoder_in length is {len(decoder_in)}')
-                # print(f'decoder_out length is {len(decoder_target)}')
-                # print(f'ratio is {(len(tokens) + len(decoder_in)) / len(event)}')
+
                 total_tokens.append(tokens)
                 total_decoder_in.append(decoder_in)
                 total_decoder_target.append(decoder_target)
@@ -957,28 +894,65 @@ def pitch_register(track_events):
         if len(register) == 0:
             registers.append(0)
         else:
-            registers.append(int(np.mean(register) / 21))
+            registers.append(int((np.mean(register) - 21) / 11))
     return registers
 
 
 #
+def cal_tension(pm):
 
 
-def add_control_event(file_events, tensiles=None, diameters=None, keys=None):
+    result = tension_calculation.extract_notes(pm, 3)
+
+
+    pm, piano_roll, sixteenth_time, beat_time, down_beat_time, beat_indices, down_beat_indices = result
+
+    key_name = tension_calculation.all_key_names
+
+    result = tension_calculation.cal_tension(
+        piano_roll, beat_time, beat_indices, down_beat_time,
+        down_beat_indices, -1, key_name)
+
+    tensiles, diameters, key_name = result
+
+    tensile_category = to_category(tensiles,tensile_bins)
+    diameter_category = to_category(diameters, diameter_bins)
+
+    # print(f'key is {key_name}')
+
+    return tensile_category, diameter_category, key_name
+
+def add_control_event(file_events,time_signature,tempo,track_program):
     file_events = np.copy(file_events)
-    r = re.compile('i_\d')
-
-    track_program = list(filter(r.match, file_events))
     num_of_tracks = len(track_program)
 
+    if file_events[1] not in time_signature_token:
+        file_events = np.insert(file_events,1,time_signature)
+        file_events = np.insert(file_events, 2, tempo)
+        for i, program in enumerate(track_program):
+            file_events = np.insert(file_events, 3+i, program)
+
     bar_pos = np.where(file_events == 'bar')[0]
+    pm = event_2midi(file_events.tolist())[0]
+    pm = remove_empty_track(pm)
+    if len(pm.instruments) < 2:
+        return None
+
+    tensiles,diameters,key = cal_tension(pm)
 
     if tensiles is not None:
         total_bars = min(len(tensiles), len(diameters), len(bar_pos))
         if total_bars < len(bar_pos):
+            print(f'total bars is {total_bars}. less than original {len(bar_pos)}')
             bar_pos = bar_pos[:total_bars + 1]
             file_events = file_events[:bar_pos[-1]]
             bar_pos = bar_pos[:-1]
+
+        if total_bars < len(tensiles):
+            print(f'total bars is {total_bars}. less than tensile {len(tensiles)}')
+            tensiles = tensiles[:total_bars]
+            diameters = diameters[:total_bars]
+
 
 
     #     print(f'number of bars is {len(bar_pos)}')
@@ -1044,9 +1018,10 @@ def add_control_event(file_events, tensiles=None, diameters=None, keys=None):
 
     file_events = file_events.tolist()
 
-    if keys:
-        key = key_to_token[keys[0]]
-        file_events.insert(3, key)
+
+
+    key = key_to_token[key]
+    file_events.insert(3, key)
 
 
     for token in track_control_tokens[::-1]:
@@ -1058,22 +1033,18 @@ def add_control_event(file_events, tensiles=None, diameters=None, keys=None):
         file_events[2] = f't_{tempo_category}'
 
     if tensiles is not None:
-        tensile_category = to_category(tensiles, tensile_bins)
-        diameter_category = to_category(diameters, diameter_bins)
 
         tension_positions = np.where(np.array(file_events) == 'track_0')[0]
 
         total_insert = 0
 
         for i, pos in enumerate(tension_positions):
-            file_events.insert(pos + total_insert, f's_{tensile_category[i]}')
+            file_events.insert(pos + total_insert, f's_{tensiles[i]}')
             total_insert += 1
-            file_events.insert(pos + total_insert, f'a_{diameter_category[i]}')
+            file_events.insert(pos + total_insert, f'a_{diameters[i]}')
             total_insert += 1
-    if keys:
-        return np.array(file_events), keys
-    else:
-        return np.array(file_events)
+
+    return np.array(file_events)
 
 
 # def gen_batches(num_tokens, data_lengths):
@@ -1183,7 +1154,7 @@ def add_control_event(file_events, tensiles=None, diameters=None, keys=None):
 #     return np.array(batch), np.array(masks)
 #
 # #
-
+#
 def walk(folder_name):
     files = []
     for p, d, f in os.walk(folder_name):
@@ -1192,86 +1163,153 @@ def walk(folder_name):
             if file_name[-5:] == 'event':
                 files.append(os.path.join(p, file_name))
     return files
-# vocab = WordVocab(all_tokens)
-# event_folder = '/home/ruiguo/dataset/lmd/lmd_separate_event/'
-# tension_folder = '/home/ruiguo/dataset/lmd/lmd_tension_three_tracks'
-# file_size = 100
-# window_size = 8
+
+
+vocab = WordVocab(all_tokens)
+event_folder = '/home/ruiguo/dataset/lmd/lmd_separate_event_no_empty_track/'
+# event_folder = '/home/ruiguo/dataset/valid_midi_out'
+
+window_size = 8
+
+files = walk(event_folder)
+
+# # keydata = json.load(open(tension_folder + '/files_result.json','r'))
 #
-# files = walk(event_folder)
+#
+def cal_separate_file(files,i):
+    return_list = []
+    print(f'file number {i}')
+    file_events = np.array(pickle.load(open(files[i], 'rb')))
+    r = re.compile('i_\d')
+    track_program = list(filter(r.match, file_events))
+    num_of_tracks = len(track_program)
+    if num_of_tracks < 2:
+        print(f'omit file {files[i]} with only one track')
+        return None
+
+    time_signature = file_events[1]
+    tempo = file_events[2]
+
+
+    bar_pos = np.where(file_events == 'bar')[0]
+
+    bar_beginning_pos = bar_pos[::8]
+
+    # meta_events = events_with_control[1:np.where('track_0' == events_with_control)[0][0] - 2]
+    # meta_without_track_control = np.concatenate([meta_events[0:3],np.array(track_program)],axis=0)
+    # # < 16 bar
+    for pos in range(len(bar_beginning_pos) - 1):
+        if pos == len(bar_beginning_pos) - 2:
+
+            # detect empty_event(
+            return_events = add_control_event(file_events[bar_beginning_pos[pos]:], time_signature, tempo,
+                                              track_program)
+        else:
+            return_events = add_control_event(file_events[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]],
+                                              time_signature, tempo, track_program)
+        if return_events is not None:
+            return_list.append(return_events.tolist())
+        else:
+            print(f'skip file {i} bar pos {pos}')
+    return return_list
+
+
+def cal_separate_event(event):
+
+
+    file_events = np.array(event)
+    r = re.compile('i_\d')
+    track_program = list(filter(r.match, file_events))
+    num_of_tracks = len(track_program)
+    if num_of_tracks < 2:
+        print(f'omit file {files[i]} with only one track')
+        return None
+
+    time_signature = file_events[1]
+    tempo = file_events[2]
+
+
+    bar_pos = np.where(file_events == 'bar')[0]
+
+    bar_beginning_pos = bar_pos[::8]
+
+    # meta_events = events_with_control[1:np.where('track_0' == events_with_control)[0][0] - 2]
+    # meta_without_track_control = np.concatenate([meta_events[0:3],np.array(track_program)],axis=0)
+    # # < 16 bar
+    for pos in range(len(bar_beginning_pos) - 1):
+        if pos == len(bar_beginning_pos) - 2:
+
+            # detect empty_event(
+            return_events = add_control_event(file_events[bar_beginning_pos[pos]:], time_signature, tempo,
+                                              track_program)
+        else:
+            return_events = add_control_event(file_events[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]],
+                                              time_signature, tempo, track_program)
+        if return_events is not None:
+            return return_events
+        else:
+            print(f'skip file')
+
+
+def gen_batches(files, max_token_length=2400, batch_window_size=8):
+
+    print(f'total files {len(files)}')
+
+
+    return_events = Parallel(n_jobs=1)(delayed(cal_separate_file)(files,i) for i in range(len(files)))
+    batches = []
+    for file_events in return_events:
+        for event in file_events:
+            batches.append(event)
+
+    batches.sort(key=len)
+    i = 0
+    while i < len(batches) - 1:
+        if batches[i] == batches[i + 1]:
+            del batches[i + 1]
+        else:
+            i += 1
+
+    batches_new = []
+    this_batch_total_length = 0
+
+    while len(batches) > 0:
+        if this_batch_total_length + len(batches[0]) < max_token_length:
+            if len(batches_new) > 0:
+                batches_new[-1].append(batches[0])
+            else:
+                batches_new.append([batches[0]])
+            this_batch_total_length += len(batches[0])
+        else:
+            if len(batches[0]) > max_token_length:
+                print(
+                    f'the event size {len(batches[0])} is greater than {max_token_length}, skip this file, or increase the max token length')
+                this_batch_total_length = 0
+            else:
+                batches_new.append([batches[0]])
+                this_batch_total_length = len(batches[0])
+        del batches[0]
+    del batches
+    gc.collect()
+    batch_lengths = {}
+    for index, item in enumerate(batches_new):
+        if len(item) not in batch_lengths:
+            batch_lengths[len(item)] = [index]
+        else:
+            batch_lengths[len(item)].append(index)
+    return batches_new, batch_lengths
 # #
-# keydata = json.load(open(tension_folder + '/files_result.json','r'))
 # #
-# def gen_batches(files, key_data, max_token_length=2400, batch_window_size=8):
-#     batches = []
-#     for i in range(len(files)):
+# all_batches,batch_length = gen_batches(files)
+# pickle.dump(all_batches, open('./sync/all_batches','wb'))
+# pickle.dump(batch_length, open('./sync/batch_length','wb'))
+
+# def gen_new_batches(max_token_length=2400, batch_window_size=8):
 #
-#         file_events = np.array(pickle.load(open(files[i], 'rb')))
-#         num_of_tracks = len(file_events[3:np.where('track_0' == file_events)[0][0]])
-#         if num_of_tracks < 2:
-#             print(f'omit file {files[i]} with only one track')
-#             continue
+#     batches = pickle.load(open('./sync/new_data','rb'))
+#     for i,batch in enumerate(batches):
+#         batches[i] = batch.tolist()
 #
-#         file_name_in_folder = files[i].split('lmd_separate_event')[1:][0][:-6]
-#         tensile_file = tension_folder + file_name_in_folder + '.tensile'
-#         diameter_file = tension_folder + file_name_in_folder + '.diameter'
-#
-#         tensiles = np.array(pickle.load(open(tensile_file, 'rb')))
-#         diameters = np.array(pickle.load(open(diameter_file, 'rb')))
-#         if tension_folder + file_name_in_folder + '.mid' in key_data:
-#             keys = key_data[tension_folder + file_name_in_folder + '.mid']
-#         else:
-#             print(f'omit file {files[i]} with no key')
-#             continue
-#         # if keys[2] != -1:
-#         #     print(f'file name is {files[i]}')
-#
-#         events_with_control, keys = add_control_event(file_events, tensiles, diameters, keys)
-#
-#         bar_pos = np.where(events_with_control == 'bar')[0]
-#         # total_bars = min(len(tensiles), len(diameters), len(bar_pos))
-#         # bar_pos = bar_pos[:total_bars]
-#
-#         bar_beginning_pos = bar_pos[::batch_window_size]
-#
-#         meta_events = events_with_control[1:np.where('track_0' == events_with_control)[0][0] - 2]
-#         meta_without_track_control = np.concatenate([meta_events[0:3],meta_events[-3:]],axis=0)
-#         if len(bar_beginning_pos) <= 2:
-#             return_events = events_with_control
-#             r = re.compile('i_\d')
-#
-#             if len(list(filter(r.match, return_events.tolist()))) > 3:
-#                 print('invalid')
-#
-#             batches.append(return_events.tolist())
-#         else:
-#             for pos in range(len(bar_beginning_pos) - 1):
-#
-#                 # print(bar_beginning_pos[pos])
-#                 if keys[2] != -1 and pos * 8 + 1 >= keys[2]:
-#                     meta_without_track_control[2] = key_to_token[keys[3]]
-#                 if pos == len(bar_beginning_pos) - 2:
-#                     # skip the last one
-#                     # continue
-#                     # return_events = file_events[bar_beginning_pos[pos]:]
-#                     events_with_header = np.insert(events_with_control[bar_beginning_pos[pos]:], 1, meta_without_track_control)
-#                     return_events = add_control_event(events_with_header)
-#
-#                 elif pos > 0:
-#
-#                     events_with_header = np.insert(events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]], 1,
-#                                               meta_without_track_control)
-#                     return_events = add_control_event(events_with_header)
-#                 # no need to change for first one
-#                 else:
-#                     return_events = events_with_control[bar_beginning_pos[pos]:bar_beginning_pos[pos + 2]]
-#
-#                 r = re.compile('i_\d')
-#
-#                 if len(list(filter(r.match, return_events.tolist()))) > 3:
-#                     print('invalid')
-#
-#                 batches.append(return_events.tolist())
 #     batches.sort(key=len)
 #     i = 0
 #     while i < len(batches) - 1:
@@ -1308,93 +1346,138 @@ def walk(folder_name):
 #         else:
 #             batch_lengths[len(item)].append(index)
 #     return batches_new, batch_lengths
+# #
+# #
+# all_batches,batch_length = gen_new_batches()
+# pickle.dump(all_batches, open('./sync/all_batches_new','wb'))
+# pickle.dump(batch_length, open('./sync/batch_length_new','wb'))
+# sys.exit()
+
+
+# validate a few event data
+
+def validate_event_data(batches):
+    for batch in batches:
+        for events in batch:
+            print(f'{len(np.where(np.array(events) == "bar")[0])}')
+            midi = event_2midi(events)[0]
+            midi.write('./temp.mid')
+            new_events = midi_2event('./temp.mid')[0]
+            print(f'{len(np.where(np.array(new_events) == "bar")[0])}')
+            added_control_event = cal_separate_event(new_events)
+            print(f'{len(np.where(np.array(added_control_event) == "bar")[0])}')
+            # for i,event in enumerate(events):
+            if len(added_control_event) < len(events):
+                print(f'added event length{len(added_control_event)} is less than { len(events)}')
+                # else:
+                #     if event != added_control_event[i]:
+                #         print('not equal')
+
+
 
 #
-# all_batches,batch_length = gen_batches(files,keydata)
-# pickle.dump(all_batches, open('all_batches_new_bins','wb'))
-# pickle.dump(batch_length, open('batch_length_new_bins','wb'))
+# all_batches = pickle.load(open('/home/ruiguo/score_transformer/sync/all_batches', 'rb'))
+# batch_length = pickle.load(open('/home/ruiguo/score_transformer/sync/batch_length', 'rb'))
+#
+# validate_event_data(all_batches)
 
 
+# #
+
 #
-# ratio_to_generate = [.1,.5,.8]
 #
-# for ratio in ratio_to_generate:
-#     all_batches = pickle.load(open('/home/ruiguo/score_transformer/all_batches_new_bins', 'rb'))
-#     batch_length = pickle.load(open('/home/ruiguo/score_transformer/batch_length_new_bins', 'rb'))
+# all_batches = pickle.load(open('/home/ruiguo/score_transformer/sync/all_batches', 'rb'))
+# batch_length = pickle.load(open('/home/ruiguo/score_transformer/sync/batch_length', 'rb'))
 #
-#     original_data_length = len(all_batches)
-#     test_ratio = ratio/10
-#     valid_ratio = test_ratio
-#     train_ratio = ratio
-#     print(f'train_ratio is {train_ratio}')
-#     print(f'valid_ratio is {valid_ratio}')
-#     print(f'test_ratio is {test_ratio}')
+# original_data_length = len(all_batches)
+# test_ratio = 0.1
+# valid_ratio = 0.1
+# train_ratio = 0.5
+# # three separate training data for generating new data in training
+# separate_training_data_ratio = 0.1
 #
-#     output_ratio_name = str(int(train_ratio * 10))
+# print(f'train_ratio is {train_ratio}')
+# print(f'valid_ratio is {valid_ratio}')
+# print(f'test_ratio is {test_ratio}')
 #
-#     test_data_index = np.random.choice(len(all_batches), int(original_data_length * test_ratio), replace=False)
 #
-#     test_data_index = np.sort(test_data_index)
 #
-#     test_batches = np.array(all_batches)[test_data_index].tolist()
-#     test_batch_lengths = {}
+# test_data_index = np.random.choice(len(all_batches), int(original_data_length * test_ratio), replace=False)
 #
-#     for index, item in enumerate(test_batches):
-#         if len(item) not in test_batch_lengths:
-#             test_batch_lengths[len(item)] = [index]
+# test_data_index = np.sort(test_data_index)
+#
+# test_batches = np.array(all_batches)[test_data_index].tolist()
+# test_batch_lengths = {}
+#
+# for index, item in enumerate(test_batches):
+#     if len(item) not in test_batch_lengths:
+#         test_batch_lengths[len(item)] = [index]
+#     else:
+#         test_batch_lengths[len(item)].append(index)
+#
+# for index in test_data_index[::-1]:
+#     del all_batches[index]
+#
+# valid_data_index = np.random.choice(len(all_batches), int(original_data_length * valid_ratio), replace=False)
+# valid_data_index = np.sort(valid_data_index)
+#
+# valid_batches = np.array(all_batches)[valid_data_index].tolist()
+# valid_batch_lengths = {}
+#
+# for index, item in enumerate(valid_batches):
+#     if len(item) not in valid_batch_lengths:
+#         valid_batch_lengths[len(item)] = [index]
+#     else:
+#         valid_batch_lengths[len(item)].append(index)
+#
+# for index in valid_data_index[::-1]:
+#     del all_batches[index]
+#
+# for i in range(3):
+#     separate_training_data_index = np.random.choice(len(all_batches), int(original_data_length * separate_training_data_ratio), replace=False)
+#     separate_training_data_index = np.sort(separate_training_data_index)
+#
+#     separate_training_batches = np.array(all_batches)[separate_training_data_index].tolist()
+#     separate_training_batch_lengths = {}
+#
+#     for index, item in enumerate(separate_training_batches):
+#         if len(item) not in separate_training_batch_lengths:
+#             separate_training_batch_lengths[len(item)] = [index]
 #         else:
-#             test_batch_lengths[len(item)].append(index)
+#             separate_training_batch_lengths[len(item)].append(index)
+#     pickle.dump(separate_training_batches, open(f'./sync/separate_training_batches_{i}','wb'))
+#     pickle.dump(separate_training_batch_lengths, open(f'./sync/separate_training_batch_lengths_{i}', 'wb'))
 #
-#     for index in test_data_index[::-1]:
+#     for index in separate_training_data_index[::-1]:
 #         del all_batches[index]
 #
-#     valid_data_index = np.random.choice(len(all_batches), int(original_data_length * valid_ratio), replace=False)
-#     valid_data_index = np.sort(valid_data_index)
+# train_batches = all_batches
+# train_batch_lengths = {}
 #
-#     valid_batches = np.array(all_batches)[valid_data_index].tolist()
-#     valid_batch_lengths = {}
-#
-#     for index, item in enumerate(valid_batches):
-#         if len(item) not in valid_batch_lengths:
-#             valid_batch_lengths[len(item)] = [index]
-#         else:
-#             valid_batch_lengths[len(item)].append(index)
-#
-#     for index in valid_data_index[::-1]:
-#         del all_batches[index]
-#
-#     train_data_index = np.random.choice(len(all_batches), int(original_data_length * train_ratio), replace=False)
-#     to_delete_index = np.setdiff1d(np.arange(len(all_batches)), train_data_index)
-#
-#     for index in to_delete_index[::-1]:
-#         del all_batches[index]
-#
-#     train_batches = all_batches
-#     train_batch_lengths = {}
-#
-#     for index, item in enumerate(train_batches):
-#         if len(item) not in train_batch_lengths:
-#             train_batch_lengths[len(item)] = [index]
-#         else:
-#             train_batch_lengths[len(item)].append(index)
+# for index, item in enumerate(train_batches):
+#     if len(item) not in train_batch_lengths:
+#         train_batch_lengths[len(item)] = [index]
+#     else:
+#         train_batch_lengths[len(item)].append(index)
 #
 #
+# print(f'train batch length is {len(train_batches)}')
+# print(f'valid batch length is {len(valid_batches)}')
+# print(f'valid batch length is {len(test_batches)}')
 #
-#     print(f'train batch length is {len(train_batches)}')
-#     print(f'valid batch length is {len(valid_batches)}')
-#     print(f'valid batch length is {len(test_batches)}')
-#     pickle.dump(train_batches, open('train_batches_0_' + output_ratio_name + '_new_bins','wb'))
-#     pickle.dump(valid_batches, open('valid_batches_0_0_' + output_ratio_name + '_new_bins','wb'))
-#     pickle.dump(test_batches, open('test_batches_0_0_' + output_ratio_name + '_new_bins','wb'))
+# print(f'separate training batch length is {len(separate_training_batches)}')
+# pickle.dump(train_batches, open('./sync/train_batches','wb'))
+# pickle.dump(valid_batches, open('./sync/valid_batches','wb'))
+# pickle.dump(test_batches, open('./sync/test_batches','wb'))
 #
-#     pickle.dump(train_batch_lengths, open('train_batch_lengths_0_' + output_ratio_name + '_new_bins','wb'))
-#     pickle.dump(valid_batch_lengths, open('valid_batch_lengths_0_0_' + output_ratio_name + '_new_bins','wb'))
-#     pickle.dump(test_batch_lengths, open('test_batch_lengths_0_0_' + output_ratio_name + '_new_bins','wb'))
+# pickle.dump(train_batch_lengths, open('./sync/train_batch_lengths','wb'))
+# pickle.dump(valid_batch_lengths, open('./sync/valid_batch_lengths','wb'))
+# pickle.dump(test_batch_lengths, open('./sync/test_batch_lengths','wb'))
 # sys.exit()
 
 # folder_prefix = '/home/ruiguo/'
-# test_batches = pickle.load(open(folder_prefix + 'score_transformer/test_batches_0_0_8_new_bins', 'rb'))
-# test_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/test_batch_lengths_0_0_8_new_bins', 'rb'))
+# test_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/test_batches_0_0_8_new_bins', 'rb'))
+# test_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/sync/test_batch_lengths_0_0_8_new_bins', 'rb'))
 #
 # #
 # span_ratio_separately_each_epoch = np.array([[1, 0, 0], [.5, .5, 0],
