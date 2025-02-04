@@ -4,8 +4,19 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 import argparse
+import preprocessing
+from preprocessing import event_2midi
+import tension_calculation
+import dataset
+import pretty_midi
 import os
-
+from vocab import *
+from generation import sampling,\
+    weighted_sampling,nucleus,\
+    softmax_with_temperature,total_duration,\
+    clear_pitch_duration_event,cal_duration,\
+    cal_track_control
+import math
 import logging
 import coloredlogs
 import pickle
@@ -23,6 +34,7 @@ from dataset import collate_mlm
 from torch.nn import functional as F
 
 import wandb
+from log import logger
 wandb.login()
 
 
@@ -382,6 +394,629 @@ def logging_config(output_folder, append=False):
     logger.info('create a logger file')
     return logger
 
+import random
+import re
+import copy
+
+
+def cal_bar_control(generated_name):
+    result = tension_calculation.extract_notes(pretty_midi.PrettyMIDI(generated_name), 3)
+
+    if result is None:
+        return None
+    pm, piano_roll, sixteenth_time, beat_time, down_beat_time, beat_indices, down_beat_indices = result
+
+    key_name = tension_calculation.all_key_names
+
+    result_generated = tension_calculation.cal_tension(
+        piano_roll, beat_time, beat_indices, down_beat_time,
+        down_beat_indices, -1, key_name)
+
+    total_tension_generated, diameters_generated, key_name_generated = result_generated
+
+    generated_tensile_category = dataset.to_category(total_tension_generated, dataset.tensile_bins)
+    generated_diameter_category = dataset.to_category(diameters_generated, dataset.tensile_bins)
+
+
+    tensile_string = [f's_{str(tensile)}' for tensile in generated_tensile_category]
+    diameter_string = [f'a_{str(diameter)}' for diameter in generated_diameter_category]
+    return tensile_string, diameter_string,key_name_generated
+
+
+
+def model_generate(model, src, tgt,device,return_weights=False):
+
+    src = src.clone().detach().unsqueeze(0).long().to(device)
+    tgt = torch.tensor(tgt).clone().detach().unsqueeze(0).to(device)
+    tgt_mask = gen_nopeek_mask(tgt.shape[1])
+    tgt_mask = tgt_mask.clone().detach().unsqueeze(0).to(device)
+
+
+    output,weights = model(src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None,
+                           tgt_mask=tgt_mask)
+    if return_weights:
+        return output.squeeze(0).to('cpu'), weights.squeeze(0).to('cpu')
+    else:
+        return output.squeeze(0).to('cpu')
+
+
+
+
+def prediction(model,event,device, vocab):
+    all_meta_pos = []
+    tokens = []
+    target_outputs = []
+    generate_outputs = []
+    for pos, token in enumerate(event):
+        if token in all_meta_tokens:
+            all_meta_pos.append(pos)
+    # tokens to index
+    start_pos = 0
+    while start_pos < len(event):
+        tokens.append(vocab.char2index(event[start_pos]))
+        start_pos += 1
+
+    for pos_chosen in all_meta_pos:
+        src = copy.copy(tokens)
+        masked_token = event[pos_chosen]
+        src[pos_chosen] = vocab.mask_indices[0]
+
+        target_output = masked_token
+
+        target_outputs.append(target_output)
+
+        # logger.info(f'target output is: {target_output}')
+
+        tgt_inp = []
+
+        for src_pos_chosen in all_meta_pos:
+            if src_pos_chosen != pos_chosen:
+                src[src_pos_chosen] = vocab.ignore_indices[0]
+
+        with torch.no_grad():
+            sampling_times = 0
+            tgt_inp.append(vocab.mask_indices[0])
+            output = model_generate(model, torch.tensor(src).long(), tgt_inp,device)
+            index = sampling(output[-1], 0.9)
+            output_token = vocab.index2char(index)
+
+            while vocab.token_class_ranges[index] != vocab.token_class_ranges[vocab.char2index(target_output)] and sampling_times < 10:
+                index = sampling(output[-1], 0.9)
+                output_token = vocab.index2char(index)
+                sampling_times += 1
+
+            generate_outputs.append(output_token)
+
+    return generate_outputs,target_outputs
+
+
+
+
+def mask_bar_and_track(event,vocab,mode):
+
+    mask_mode = mode
+    tokens = []
+
+    decoder_target = []
+    masked_indices_pairs = []
+    mask_bar_names = []
+    mask_track_names = []
+    bar_poses = np.where(np.array(event) == 'bar')[0]
+
+    r = re.compile('i_\d')
+
+    track_program = list(filter(r.match, event))
+    track_nums = len(track_program)
+    track_end_poses = []
+    if track_nums == 3:
+        track_0_pos = np.where('track_0' == np.array(event))[0]
+        track_1_pos = np.where('track_1' == np.array(event))[0]
+        track_2_pos = np.where('track_2' == np.array(event))[0]
+        for pos in track_2_pos[:-1]:
+            track_end_poses.append(bar_poses[np.where(pos < bar_poses)[0][0]])
+        else:
+            track_end_poses.append(len(event))
+        all_track_pos = np.sort(np.concatenate([track_0_pos, track_1_pos, track_2_pos, track_end_poses]))
+
+    elif track_nums == 2:
+        #         ratios = track_ratio[1]
+        track_0_pos = np.where('track_0' == np.array(event))[0]
+        track_1_pos = np.where('track_1' == np.array(event))[0]
+        for pos in track_1_pos[:-1]:
+            track_end_poses.append(bar_poses[np.where(pos < bar_poses)[0][0]])
+        else:
+            track_end_poses.append(len(event))
+        all_track_pos = np.sort(np.concatenate([track_0_pos, track_1_pos, track_end_poses]))
+
+    else:
+        track_0_pos = np.where('track_0' == np.array(event))[0]
+        for pos in track_0_pos[:-1]:
+            track_end_poses.append(bar_poses[np.where(pos < bar_poses)[0][0]])
+        else:
+            track_end_poses.append(len(event))
+        all_track_pos = np.sort(np.concatenate([track_0_pos, track_end_poses]))
+
+    bar_with_track_poses = []
+
+    for i, pos in enumerate(all_track_pos):
+        if i % (track_nums + 1) == 0:
+            this_bar_poses = []
+            this_bar_pairs = []
+            this_bar_poses.append(pos)
+
+        else:
+            this_bar_poses.append(pos)
+            if i % (track_nums + 1) == track_nums:
+                for j in range(len(this_bar_poses) - 1):
+                    this_bar_pairs.append((this_bar_poses[j], this_bar_poses[j + 1]))
+
+                bar_with_track_poses.append(this_bar_pairs)
+
+    # 25% mask whole tracks(select from 1 to track_num track)
+    # 25% mask whole bars(select from 1 to bar num)
+    # 50% mask random bars(select from 1 to bar num, random tracks
+    # (select 1 from track number in a bar)
+
+    if mask_mode == 0:
+        bar_mask_number = np.random.randint(0,len(bar_poses))
+        bar_mask_poses = np.sort(np.random.choice(len(bar_poses),size=bar_mask_number+1,replace=False))
+
+        for bar_mask_pos in bar_mask_poses:
+            track_mask_number = np.random.randint(0, track_nums)
+            track_mask_poses = np.sort(np.random.choice(track_nums,size=track_mask_number+1,replace=False))
+            for track_mask_pos in track_mask_poses:
+                mask_track_names.append(track_mask_pos)
+                mask_bar_names.append(bar_mask_pos)
+                bar_with_track_poses[bar_mask_pos][track_mask_pos]
+                masked_indices_pairs.append(bar_with_track_poses[bar_mask_pos][track_mask_pos])
+    elif mask_mode == 1:
+        # mask whole tracks
+        track_mask_number = np.random.randint(0, track_nums)
+        track_mask_poses = np.sort(np.random.choice(track_nums, size=track_mask_number + 1, replace=False))
+
+        for bar_num, tracks_in_a_bar in enumerate(bar_with_track_poses):
+            for track_pos, track_star_end_poses in enumerate(tracks_in_a_bar):
+                if track_pos in track_mask_poses:
+                    mask_bar_names.append(bar_num)
+                    mask_track_names.append(track_pos)
+                    masked_indices_pairs.append(track_star_end_poses)
+
+    else:
+        # mask whole bars
+        bar_mask_number = np.random.randint(0, len(bar_poses))
+        bar_mask_poses = np.sort(np.random.choice(len(bar_poses),size=bar_mask_number+1,replace=False))
+
+        for bar_mask_pos in bar_mask_poses:
+            for tracks_in_a_bar in bar_with_track_poses[bar_mask_pos]:
+                for track_name in range(track_nums):
+                    mask_bar_names.append(bar_mask_pos)
+                    mask_track_names.append(track_name)
+                masked_indices_pairs.append(tracks_in_a_bar)
+
+    assert len(mask_bar_names) == len(mask_track_names)
+
+    token_events = event.copy()
+
+    for masked_pairs in masked_indices_pairs:
+        masked_token = event[masked_pairs[0]:masked_pairs[1]]
+
+        for token in masked_token:
+            decoder_target.append(vocab.char2index(token))
+        else:
+            decoder_target.append(vocab.eos_index)
+
+    for masked_pairs in masked_indices_pairs[::-1]:
+        # print(masked_pairs)
+        # print(token_events[masked_pairs[0]:masked_pairs[1]])
+        for pop_time in range(masked_pairs[1] - masked_pairs[0]):
+            token_events.pop(masked_pairs[0])
+        token_events.insert(masked_pairs[0], 'm_0')
+
+    for token in token_events:
+        tokens.append(vocab.char2index(token))
+
+    tokens = np.array(tokens)
+    decoder_target = np.array(decoder_target)
+
+    return tokens, decoder_target, mask_track_names, mask_bar_names
+
+def cut_duration(event):
+    return event
+def generation(model,event,device, vocab,mode,temperature=0.9):
+    src, tgt_out, mask_track_names, mask_bar_names = mask_bar_and_track(event, vocab,  mode)
+
+    duration_name_to_time, duration_time_to_name, duration_times, bar_duration = preprocessing.get_note_duration_dict(
+        1, (int(event[0][0]), int(event[0][2])))
+
+    src_masked_track = np.sum(src == vocab.char2index('m_0'))
+    tgt_inp = []
+    generate_times = 0
+    weight_list = []
+    tgt_inp_list = []
+
+    with torch.no_grad():
+        mask_idx = 0
+        while mask_idx < src_masked_track:
+            mask_track_name = 'track_' + f'{str(mask_track_names[mask_idx])}'
+            # logger.info(f'current mask idx is {mask_idx}')
+
+            # for mask_idx in range(src_masked_track):
+            this_tgt_inp = []
+
+            this_tgt_failure = False
+            track_name_failure = False
+            pitch_failure = False
+            duration_failure = False
+
+            this_tgt_inp.append(vocab.char2index('m_0'))
+
+            curr_time = 0
+            previous_duration = 0
+
+            in_duration_event = False
+            is_rest_s = False
+
+            in_pitch_event = False
+
+            duration_list = []
+
+            while this_tgt_inp[-1] != vocab.char2index('<eos>') and len(this_tgt_inp) < 500:
+                sampling_times = 0
+                output, weight = model_generate(model, torch.tensor(src), tgt_inp + this_tgt_inp, device, return_weights=True)
+                index = sampling(output[-1], 1.2)
+                sampling_times += 1
+
+                event = vocab.index2char(index)
+                # logger.info(event)
+
+                if len(this_tgt_inp) == 1:
+
+                    compare_event = event
+                    if compare_event != mask_track_name:
+                        while compare_event != mask_track_name and sampling_times < 10:
+                            index = sampling(output[-1], temperature)
+                            event = vocab.index2char(index)
+                            sampling_times += 1
+
+                            compare_event = event
+                        if compare_event != mask_track_name:
+                            sampling_times = 0
+                            while compare_event != mask_track_name and sampling_times < 10:
+                                output, weight = model_generate(model, torch.tensor(src), tgt_inp + this_tgt_inp, device,
+                                                                return_weights=True)
+                                index = sampling(output[-1], temperature)
+                                event = vocab.index2char(index)
+                                sampling_times += 1
+
+                                compare_event = event
+                            if compare_event != mask_track_name:
+                                # logger.info(f'{compare_event} is not equal to {mask_track_name}')
+                                # logger.info(f'mask {mask_idx} needs to be generated again')
+                                this_tgt_failure = True
+                                track_name_failure = True
+
+                if event in pitches:
+                    in_pitch_event = True
+                    if in_duration_event:
+                        curr_time, previous_duration = clear_pitch_duration_event(
+                            curr_time,
+                            previous_duration,
+                            is_rest_s,
+                            duration_list, duration_name_to_time)
+
+                        duration_list = []
+
+                        in_duration_event = False
+                        is_rest_s = False
+
+                if event in duration_name_to_time.keys():
+                    if not in_duration_event and not in_pitch_event:
+                        # generate a pitch event token
+                        while event not in pitches and sampling_times < 10:
+                            index = sampling(output[-1], temperature)
+                            event = vocab.index2char(index)
+                            sampling_times += 1
+                        if event not in pitches:
+                            sampling_times = 0
+                            while event not in pitches and sampling_times < 10:
+                                output, weight = model_generate(model, torch.tensor(src), tgt_inp + this_tgt_inp, device,
+                                                                return_weights=True)
+                                index = sampling(output[-1], temperature)
+                                event = vocab.index2char(index)
+                                sampling_times += 1
+                            if event != pitches:
+                                # logger.info(f'{event} is not pitch')
+                                # logger.info(f'mask {mask_idx} needs to be generated again')
+                                this_tgt_failure = True
+                                pitch_failure = True
+
+                        in_pitch_event = True
+                    else:
+                        in_pitch_event = False
+                        duration_list.append(event)
+                        in_duration_event = True
+
+                # an event not in duration event happens
+
+                if event == 'rest_s':
+                    is_rest_s = True
+
+                if event == '<eos>':
+                    if in_duration_event:
+                        curr_time, previous_duration = clear_pitch_duration_event(
+                            curr_time,
+                            previous_duration,
+                            is_rest_s,
+                            duration_list, duration_name_to_time)
+
+
+                    if not math.isclose(curr_time, bar_duration):
+                        # logger.info(f'{curr_time} is not equal to {bar_duration}')
+                        # logger.info(f'mask {mask_idx} needs to be generated again')
+                        this_tgt_failure = True
+                        duration_failure = True
+
+                this_tgt_inp.append(index)
+
+            if this_tgt_inp[-1] == vocab.char2index('<eos>') and not this_tgt_failure:
+                mask_idx += 1
+                tgt_inp.extend(this_tgt_inp[:-1])
+                weight_list.append(weight)
+                this_tgt_inp_tokens = []
+                for index in this_tgt_inp[:-1]:
+                    this_tgt_inp_tokens.append(vocab.index2char(index))
+                tgt_inp_list.append(this_tgt_inp_tokens)
+
+            # no eos after long generation
+            elif this_tgt_inp[-1] != vocab.char2index('<eos>'):
+                return None
+            else:
+                # logger.info(f'generate again, generate time is {generate_times}')
+                generate_times += 1
+                if generate_times > 2:
+                    # logger.info(f'fail to have correct track duration {mask_idx} after 10 times')
+                    #return None
+                    if track_name_failure:
+                        # logger.info('manually correct track name')
+                        tgt_inp.append(vocab.char2index(mask_track_name))
+                    if duration_failure:
+                        # logger.info('duration failure')
+                        # logger.info('manually correct duration')
+                        this_tgt_inp = cut_duration(this_tgt_inp)
+                        tgt_inp.extend(this_tgt_inp[:-1])
+                    if pitch_failure:
+                        # logger.info('pitch failure')
+                        return None
+
+                    weight_list.append(None)
+
+                    mask_idx += 1
+
+    generated_output = []
+    target_output = []
+    src_token = []
+
+    for i, token_idx in enumerate(tgt_inp):
+        output_token = vocab.index2char(token_idx)
+        generated_output.append(output_token)
+
+    for i, token_idx in enumerate(tgt_out):
+        target_token = vocab.index2char(token_idx.item())
+        target_output.append(target_token)
+
+    # logger.info(f'generation {generated_output}')
+    # logger.info(f'target {target_output}')
+
+    for i, token_idx in enumerate(src):
+        src_token.append(vocab.index2char(token_idx.item()))
+
+
+    return restore_marked_input(src_token, generated_output), mask_track_names,mask_bar_names
+
+
+
+
+def restore_marked_input(src_token, generated_output):
+    src_token = np.array(src_token,dtype='<U9')
+
+    # restore with generated output
+    restored_with_generated_token = src_token.copy()
+
+    generated_output = np.array(generated_output)
+
+    generation_mask_indices = np.where(generated_output == 'm_0')[0]
+
+    if len(generation_mask_indices) == 1:
+
+        mask_indices = np.where(restored_with_generated_token == 'm_0')[0]
+        generated_result_sec = generated_output[generation_mask_indices[0] + 1:]
+
+        #         logger.info(len(generated_result_sec))
+        restored_with_generated_token = np.delete(restored_with_generated_token, mask_indices[0])
+        for token in generated_result_sec[::-1]:
+            #             logger.info(token)
+            restored_with_generated_token = np.insert(restored_with_generated_token, mask_indices[0], token)
+
+
+    else:
+
+        for i in range(len(generation_mask_indices) - 1):
+            #         logger.info(i)
+            mask_indices = np.where(restored_with_generated_token == 'm_0')[0]
+            generated_result_sec = generated_output[generation_mask_indices[i] + 1:generation_mask_indices[i + 1]]
+
+            #             logger.info(len(generated_result_sec))
+            #             logger.info(mask_indices[i])
+            restored_with_generated_token = np.delete(restored_with_generated_token, mask_indices[0])
+
+            for token in generated_result_sec[::-1]:
+                #                 logger.info(token)
+                restored_with_generated_token = np.insert(restored_with_generated_token, mask_indices[0], token)
+
+        else:
+            #         logger.info(i)
+            mask_indices = np.where(restored_with_generated_token == 'm_0')[0]
+            generated_result_sec = generated_output[generation_mask_indices[i + 1] + 1:]
+
+            #             logger.info(len(generated_result_sec))
+            restored_with_generated_token = np.delete(restored_with_generated_token, mask_indices[0])
+            for token in generated_result_sec[::-1]:
+                #                 logger.info(token)
+                restored_with_generated_token = np.insert(restored_with_generated_token, mask_indices[0], token)
+
+
+    return restored_with_generated_token
+
+def bar_track_validate(output_indices, index, mask_track_name, time_signature,total_duration,vocab):
+    if len(output_indices) == 1:
+        # index must match track name
+        if vocab.char2index(index) != mask_track_name:
+            return False
+    if vocab.char2index(index) == '<eos>':
+        duration = cal_duration(output_indices,time_signature)
+        if total_duration != duration:
+            return False
+    return True
+
+
+
+
+def generate_and_prediction(model,event,device,vocab):
+    # first predict all the control tokens
+    logger.info('generation/prediction test')
+    generated_outputs,target_outputs = prediction(model,event,device,vocab)
+
+
+    logger.info(f'predicted output is {generated_outputs[:40]}')
+    logger.info(f'target output is {target_outputs[:40]}')
+    prediction_accuracy = generation_accuracy(generated_outputs,target_outputs,vocab)
+    logger.info(f'prediction accuracy is {prediction_accuracy}')
+
+    accuracy_result = {}
+    accuracy_result['bar_control'] = []
+    accuracy_result['track_control'] = []
+    accuracy_result['tensile'] = []
+    accuracy_result['diameter'] = []
+    accuracy_result['density'] = []
+    accuracy_result['polyphony'] = []
+    accuracy_result['occupation'] = []
+    accuracy_result['pitch_register'] = []
+
+    # generation
+    bar_poses = np.where(np.array(event) == 'bar')[0]
+
+    r = re.compile('i_\d')
+
+    track_program = list(filter(r.match, event))
+    track_nums = len(track_program)
+
+    target_track_control = event[3:bar_poses[0]-track_nums]
+    r = re.compile('(?:a_|s_)')
+
+    target_bar_control = list(filter(r.match, event))
+    # 1. random mask bar and track
+    # 2. mask one/several tracks
+
+    for mode in range(2):
+        tensile_accuracy = 0
+        diameter_accuracy = 0
+        bar_control_accuacy = 0
+
+        track_control_accuracy = 0
+        density_control_accuracy = 0
+        polyphony_control_accuracy = 0
+        occupation_control_accuracy = 0
+        pitch_register_control_accuracy = 0
+
+        result = generation(model, event, device, vocab, mode)
+        if result is None:
+            return None
+        else:
+            generated_tokens, mask_track_names, mask_bar_names = result
+
+        # logger.info(f'mask_track_names is {mask_track_names}')
+        # logger.info(f'mask_bar_names is {mask_bar_names}')
+        generated_pm, _ = event_2midi(generated_tokens.tolist())
+        generated_track_control = cal_track_control(generated_tokens,
+                                                    generated_pm)
+        generated_pm.write('./temp.mid')
+        bar_controls = cal_bar_control('./temp.mid')
+        if bar_controls is not None:
+            generated_tensile, generated_diameter,key_name = bar_controls
+
+        if len(generated_tensile) != len(bar_poses):
+            bar_controls = None
+            logger.info('generated bar is not equal to original bar length')
+
+        if mode == 0:
+            mask_track_bar_names = []
+            logger.info(f'random mask bars and tracks')
+            for i in range(len(mask_track_names)):
+                mask_track_bar_names.append((mask_bar_names[i],mask_track_names[i]))
+            logger.info(f'random mask bar/track name {mask_track_bar_names} \n')
+        else:
+            logger.info(f'mask whole track {np.unique(np.array(mask_track_names))}')
+
+        mask_track_num = len(np.unique(np.array(mask_track_names)))
+        mask_bar_num = len(np.unique(np.array(mask_bar_names)))
+
+        if generated_track_control is not None:
+            generated_track_control_in_tracks = []
+            target_track_control_in_tracks = []
+
+            for i, control in enumerate(generated_track_control):
+                if i % track_nums in mask_track_names:
+                    generated_track_control_in_tracks.append(generated_track_control[i])
+                    target_track_control_in_tracks.append(target_track_control[i])
+
+                    if vocab.token_class_ranges[vocab.char2index(control)] == 'density':
+                        density_control_accuracy += control == target_track_control[i]
+                        track_control_accuracy += control == target_track_control[i]
+                    elif vocab.token_class_ranges[vocab.char2index(control)] == 'polyphony':
+                        polyphony_control_accuracy += control == target_track_control[i]
+                        track_control_accuracy += control == target_track_control[i]
+                    elif vocab.token_class_ranges[vocab.char2index(control)] == 'occupation':
+                        occupation_control_accuracy += control == target_track_control[i]
+                        track_control_accuracy += control == target_track_control[i]
+                    else:
+                        pitch_register_control_accuracy += control == target_track_control[i]
+                        track_control_accuracy += control == target_track_control[i]
+
+            logger.info(f'generated track control is {generated_track_control_in_tracks}\n'
+                        f'target track control is {target_track_control_in_tracks}')
+
+            accuracy_result['track_control'].append(track_control_accuracy / mask_track_num / 4)
+            accuracy_result['density'].append(density_control_accuracy / mask_track_num)
+            accuracy_result['polyphony'].append(polyphony_control_accuracy / mask_track_num)
+            accuracy_result['occupation'].append(occupation_control_accuracy / mask_track_num)
+            accuracy_result['pitch_register'].append(pitch_register_control_accuracy / mask_track_num)
+        else:
+            logger.info('track control is None, skip')
+
+        bar_control_in_bars = []
+        target_bar_control_in_bars = []
+
+        if bar_controls is not None:
+            for bar_number in np.unique(np.array(mask_bar_names)):
+                bar_control_in_bars.append(generated_tensile[bar_number])
+                bar_control_in_bars.append(generated_diameter[bar_number])
+                target_bar_control_in_bars.extend(target_bar_control[bar_number*2:bar_number*2+2])
+
+                tensile_accuracy += generated_tensile[bar_number] == target_bar_control[bar_number*2]
+                bar_control_accuacy += generated_tensile[bar_number] == target_bar_control[bar_number*2]
+                diameter_accuracy += generated_diameter[bar_number] == target_bar_control[bar_number*2+1]
+                bar_control_accuacy += generated_diameter[bar_number] == target_bar_control[bar_number*2+1]
+            accuracy_result['bar_control'].append(bar_control_accuacy / mask_bar_num)
+            accuracy_result['tensile'].append(tensile_accuracy / mask_bar_num)
+            accuracy_result['diameter'].append(diameter_accuracy / mask_bar_num)
+
+            logger.info(
+                f'generated bar control is  {bar_control_in_bars} \n'
+                f'target bar control is {target_bar_control_in_bars}')
+
+
+        else:
+            logger.info('bar control is None')
 
 def run(config, checkpoint_dir=None,run_id=None):
     if is_debug:
@@ -402,11 +1037,25 @@ def run(config, checkpoint_dir=None,run_id=None):
         # access all HPs through wandb.config, so logging matches execution!
         config = wandb.config
         current_folder = wandb.run.dir
+        logfile = current_folder + '/logging.log'
         if resume:
-            logger = logging_config(current_folder,True)
-            logger.info('resume previous unfinished task')
+            filemode = 'a'
         else:
-            logger = logging_config(current_folder)
+            filemode = 'w'
+        logger.handlers = []
+        logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.DEBUG,
+                            datefmt='%Y-%m-%d %H:%M:%S', filename=logfile, filemode=filemode)
+
+        console = logging.StreamHandler()
+        console.setLevel(logging.INFO)
+        # set a format which is simpler for console use
+        formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(message)s',
+                                      datefmt='%Y-%m-%d %H:%M:%S')
+        console.setFormatter(formatter)
+        logger.addHandler(console)
+
+        coloredlogs.install(level='INFO', logger=logger, isatty=False)
+
         vocab = WordVocab(all_tokens)
 
         for key in config.keys():
@@ -424,7 +1073,6 @@ def run(config, checkpoint_dir=None,run_id=None):
         model = ScoreTransformer(vocab.vocab_size, config['d_model'], config['nhead'], config['num_encoder_layers'],
                                  config['num_encoder_layers'], 2048, 2400,
                                  0.1, 0.1)
-
 
 
         for p in model.parameters():
@@ -449,7 +1097,7 @@ def run(config, checkpoint_dir=None,run_id=None):
             for k, v in model_state.items():
                 name = k[7:] # remove `module.`
                 new_state_dict[name] = v
-
+            #
             # new_state_dict = model_state
 
             model.load_state_dict(new_state_dict)
@@ -495,25 +1143,30 @@ def run(config, checkpoint_dir=None,run_id=None):
         else:
 
             if is_debug:
-                train_batch_name = 'test_batches_0_0_1'
-                train_length_name = 'test_batch_lengths_0_0_1'
-                valid_batch_name = 'valid_batches_0_0_1'
-                valid_batch_length_name = 'valid_batch_lengths_0_0_1'
+                train_batch_name = 'all_batches_0'
+                train_length_name = 'batch_length_0'
+                valid_batch_name = 'valid_batches_new'
+                valid_batch_length_name = 'valid_batch_lengths_new'
+                test_batch_name = 'test_batches_new'
 
             else:
-                train_batch_name = 'train_batches_0_8'
-                train_length_name = 'train_batch_lengths_0_8'
-                valid_batch_name = 'valid_batches_0_0_8'
-                valid_batch_length_name = 'valid_batch_lengths_0_0_8'
+                train_batch_name = 'all_batches_1'
+                train_length_name = 'batch_length_1'
+                valid_batch_name = 'valid_batches_new'
+                valid_batch_length_name = 'valid_batch_lengths_new'
+                test_batch_name = 'test_batches_new'
 
         train_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/' + train_batch_name, 'rb'))
+        # train_batches = train_batches[18000:]
         train_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/sync/' + train_length_name, 'rb'))
 
+
         valid_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/' + valid_batch_name, 'rb'))
+
         valid_batch_lengths = pickle.load(
             open(folder_prefix + 'score_transformer/sync/' + valid_batch_length_name, 'rb'))
 
-        # test_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/test_batches_0_0_1', 'rb'))
+        test_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/' + test_batch_name, 'rb'))
         # test_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/sync/test_batch_lengths_0_0_1', 'rb'))
 
         logger.info(f'train batches file is  {folder_prefix + "score_transformer/" + train_batch_name}')
@@ -521,7 +1174,7 @@ def run(config, checkpoint_dir=None,run_id=None):
 
         logger.info(f'train batch length is {len(train_batches)}')
         logger.info(f'valid batch length is {len(valid_batches)}')
-        # print(f'test batch length is {len(test_batches)}')
+        logger.info(f'test batch length is {len(test_batches)}')
 
 
 
@@ -529,7 +1182,7 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 '',
                                                 vocab,
                                                 0, 0,
-                                                2400,
+                                                2200,
                                                 window_size,
                                                 train_batches,
                                                 train_batch_lengths,
@@ -538,11 +1191,13 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 .3,
                                                 .3,
                                                 .3,
-                                                .9,
-                                                .3,
-                                                3,
-                                                0.5,
-                                                span_ratio_separately_each_epoch,
+                                                control_mask_ratio=.9,
+                                                header_mask_ratio=.3,
+                                                ignore_ratio=0.05,
+                                                span_lengths=3,
+                                                span_ratio_jointly=config['span_ratio_jointly'],
+                                                span_ratio_separately_each_epoch=span_ratio_separately_each_epoch,
+                                                logger=logger,
                                                 mask_bar_num_ratio=None,
                                                 mask_track_num_ratio=None,
                                                 mask_bar_ctrl_token=False,
@@ -554,7 +1209,7 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 '',
                                                 vocab, 0,
                                                 0,
-                                                2400,
+                                                2200,
                                                 window_size,
                                                 valid_batches,
                                                 valid_batch_lengths,
@@ -567,7 +1222,9 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 .3,
                                                 3,
                                                 0.5,
-                                                span_ratio_separately_each_epoch,
+                                                span_ratio_jointly=config['span_ratio_jointly'],
+                                                span_ratio_separately_each_epoch=span_ratio_separately_each_epoch,
+                                                logger=logger,
                                                 mask_bar_num_ratio=None,
                                                 mask_track_num_ratio=None,
                                                 mask_bar_ctrl_token=False,
@@ -712,7 +1369,7 @@ def run(config, checkpoint_dir=None,run_id=None):
 
         print_every = 100
 
-        learning_rate_adjust_interval = 5000
+        generation_interval = 3000
         model.train()
 
         lowest_val = 1e9
@@ -766,10 +1423,16 @@ def run(config, checkpoint_dir=None,run_id=None):
             tensile_losses = 0
             diameter_losses = 0
 
+            # validate(valid_data_loader, model, config, ce_weight_all, ce_loss, time_signature_loss, program_loss,
+            #          key_loss, tempo_loss, density_loss, occupation_loss, polyphony_loss, pitch_register_loss,
+            #          tensile_loss, diameter_loss, device, vocab, logger)
 
             for step, data in enumerate(train_data_loader):
                 total_step += 1
+                if data is None:
+                    continue
                 example_ct += len(data['input'])
+
                 # Send the batches and key_padding_masks to gpu
                 src, src_key_padding_mask = data['input'].to(device), data['input_pad_mask'].to(device)
                 tgt_inp, tgt_key_padding_mask = data['target_in'].to(device), data['target_pad_mask'].to(device)
@@ -866,7 +1529,8 @@ def run(config, checkpoint_dir=None,run_id=None):
                     accuracies, generated_output, target_output = accuracy(outputs, tgt_out, vocab)
 
                     for token_type in accuracies.keys():
-                        every_print_accuracy[token_type] += accuracies[token_type]
+                        if accuracies[token_type] is not None:
+                            every_print_accuracy[token_type] += accuracies[token_type]
 
 
                     wandb.log({"epoch": epoch,
@@ -946,6 +1610,20 @@ def run(config, checkpoint_dir=None,run_id=None):
                                  )
 
                     # pbar = tqdm(total=print_every, leave=False)
+                if step % generation_interval == generation_interval - 1:
+                    batch_number = random.choice(range(len(test_batches)))
+                    in_batch_number = random.choice(range(len(test_batches[batch_number])))
+                    logger.debug(f'test batch {(batch_number,in_batch_number)}')
+                    event = test_batches[batch_number][in_batch_number]
+
+                    # r = re.compile('i_\d')
+                    #
+                    # track_program = list(filter(r.match, event))
+                    # track_nums = len(track_program)
+                    #
+                    # if track_nums == 1:
+
+                    generate_and_prediction(model,event,device,vocab)
 
             logger.info(f'Epoch [{epoch} / {num_epochs} end]')
 
@@ -1037,6 +1715,66 @@ def run(config, checkpoint_dir=None,run_id=None):
         #                                    config['num_epochs'], vocab)
         # logger.info(f'training losses is {train_losses[-1]}'
         #       f'validation losses is {valid_losses[-1]}')
+def generation_accuracy(outputs, targets, vocab):
+    # define total accuracy, structure accuracy, control accuracy,
+    # duration accuracy, pitch accuracy
+    with torch.no_grad():
+        # print('\n')
+        accuracy_result = {}
+        types_number_counter = {}
+        all_type_token = set(vocab.token_class_ranges.values())
+        for one_type_token in all_type_token:
+            accuracy_result[one_type_token] = 0
+            types_number_counter[one_type_token] = 0
+        accuracy_result['total'] = 0
+        types_number_counter['total'] = 0
+
+        accuracy_result['track_control'] = 0
+        types_number_counter['track_control'] = 0
+        accuracy_result['bar_control'] = 0
+        types_number_counter['bar_control'] = 0
+
+        for i, output in enumerate(outputs):
+
+
+            target_classes = vocab.get_token_classes(vocab.char2index(targets[i]))
+
+            accuracy_result[target_classes] += outputs[i] == targets[i]
+            types_number_counter[target_classes] += 1
+
+            accuracy_result['total'] += outputs[i] == targets[i]
+            types_number_counter['total'] += 1
+
+        accuracy_result['track_control'] = accuracy_result['density'] + \
+                                           accuracy_result['occupation'] + \
+                                           accuracy_result['polyphony'] + \
+                                           accuracy_result['pitch_register']
+
+        types_number_counter['track_control'] = types_number_counter['density'] + \
+                                                types_number_counter['occupation'] + \
+                                                types_number_counter['polyphony'] + \
+                                                types_number_counter['pitch_register']
+
+
+        accuracy_result['bar_control'] = accuracy_result['tensile'] + \
+                                         accuracy_result['diameter']
+
+        types_number_counter['bar_control'] = types_number_counter['tensile'] + \
+                                              types_number_counter['diameter']
+
+        for token_type in accuracy_result.keys():
+            if types_number_counter[token_type] != 0:
+                accuracy_result[token_type] /= types_number_counter[token_type]
+            else:
+                accuracy_result[token_type] = None
+
+        accuracy_result = {k: v for k, v in accuracy_result.items() if v is not None}
+
+
+        return accuracy_result
+
+
+
 
 
 def accuracy(outputs, targets, vocab):
@@ -1096,7 +1834,6 @@ def accuracy(outputs, targets, vocab):
                                                 types_number_counter['polyphony'] + \
                                                 types_number_counter['pitch_register']
 
-        # accuracy_result['track_control'] /= types_number_counter['track_control']
 
         accuracy_result['bar_control'] = accuracy_result['tensile'] + \
                                          accuracy_result['diameter']
@@ -1104,11 +1841,13 @@ def accuracy(outputs, targets, vocab):
         types_number_counter['bar_control'] = types_number_counter['tensile'] + \
                                               types_number_counter['diameter']
 
-        # accuracy_result['bar_control'] /= types_number_counter['bar_control']
-
         for token_type in accuracy_result.keys():
             if types_number_counter[token_type] != 0:
                 accuracy_result[token_type] /= types_number_counter[token_type]
+            else:
+                accuracy_result[token_type] = None
+
+        accuracy_result = {k: v for k, v in accuracy_result.items() if v is not None}
 
         return accuracy_result, generated_output, target_output
 
@@ -1131,31 +1870,19 @@ def validate(valid_loader, model,config, ce_weight_all,ce_loss,time_signature_lo
     total_accuracy = {'total': 0,
                       'track_control': 0,
                       'bar_control': 0}
-
+    types_number_counter = {}
+    types_number_counter['bar_control'] = 0
     for token_type in set(vocab.token_class_ranges.values()):
         total_accuracy[token_type] = 0
         total_loss[token_type] = 0
-
-    # total_accuracy = {'total': 0,
-    #                   'pitch': 0,
-    #                   'duration': 0,
-    #                   'structure': 0,
-    #                   'tempo': 0,
-    #                   'time_signature': 0,
-    #                   'track_control': 0,
-    #                   'bar_control': 0,
-    #                   'density': 0,
-    #                   'polyphony': 0,
-    #                   'occupation': 0,
-    #                   'pitch_register': 0,
-    #                   'tensile': 0,
-    #                   'diameter': 0,
-    #                   'key': 0,
-    #                   'program': 0,
-    #                   'eos': 0}
+        types_number_counter[token_type] = 0
+        types_number_counter['total'] = 0
+        types_number_counter['track_control'] = 0
 
     for data in iter(valid_loader):
         total_steps += 1
+        if data is None:
+            continue
         # Send the batches and key_padding_masks to gpu
         src, src_key_padding_mask = data['input'].to(device), data['input_pad_mask'].to(device)
         tgt_inp, tgt_key_padding_mask = data['target_in'].to(device), data['target_pad_mask'].to(device)
@@ -1169,6 +1896,7 @@ def validate(valid_loader, model,config, ce_weight_all,ce_loss,time_signature_lo
             np.repeat(np.expand_dims(tgt_mask, 0), memory_key_padding_mask.shape[0], axis=0)).float()
 
         tgt_mask = tgt_mask.to(device)
+
         with torch.no_grad():
             outputs,weights = model(src, tgt_inp, src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask, tgt_mask)
 
@@ -1220,26 +1948,50 @@ def validate(valid_loader, model,config, ce_weight_all,ce_loss,time_signature_lo
 
             accuracies, generated_output, target_output = accuracy(outputs, tgt_out, vocab)
 
+
+
             for token_type in total_accuracy.keys():
-                total_accuracy[token_type] += accuracies[token_type]
+                if token_type in accuracies:
+                    total_accuracy[token_type] += accuracies[token_type]
+                    types_number_counter[token_type] += 1
+
+            # src_token = []
+            # tgt_inputs = []
+            # for i, output in enumerate(src[0]):
+            #     output_token = vocab.index2char(output.item())
+            #     src_token.append(output_token)
+            #
+            # for i, output in enumerate(tgt_inp[0]):
+            #     tgt_inputs.append(vocab.index2char(output.item()))
+            #
+            # break
 
 
     for key in total_loss.keys():
+
         total_loss[key] /= total_steps
 
     for key in total_accuracy.keys():
-        total_accuracy[key] /= total_steps
+        if types_number_counter[key] != 0:
+            total_accuracy[key] /= types_number_counter[key]
+        else:
+            total_accuracy[key] = None
 
     src_token = []
+    tgt_inputs = []
     for i, output in enumerate(src[0]):
         output_token = vocab.index2char(output.item())
         src_token.append(output_token)
 
+    for i, output in enumerate(tgt_inp[0]):
+        tgt_inputs.append(vocab.index2char(output.item()))
+
     logger.info(f'input size is {src.size()} \n'
                 f'input is : {src_token[:50]} \n'
+                f'target input: {tgt_inputs} \n'
                 f'output size is {len(target_output)} \n'
-                f'generated output: {generated_output[:50]} \n'
-                f'target output: {target_output[:50]} \n')
+                f'generated output: {generated_output} \n'
+                f'target output: {target_output} \n')
 
     # pbar = tqdm(total=print_every, leave=False)
 
@@ -1329,6 +2081,19 @@ def test_loss_accuracy(test_loader, model, criterion, device, vocab, logger):
 
             # logger.info(f'loss is {loss}')
             # logger.info(f'total accuracy is {accuracies["total"]}')
+
+
+            #test
+            src_token = []
+            for i, output in enumerate(src[0]):
+                output_token = vocab.index2char(output.item())
+                src_token.append(output_token)
+
+            logger.info(f'input size is {src.size()} \n'
+                        f'input is : {src_token[:50]} \n'
+                        f'output size is {len(target_output)} \n'
+                        f'generated output: {generated_output[:50]} \n'
+                        f'target output: {target_output[:50]} \n')
 
     total_loss /= total_data_length
 

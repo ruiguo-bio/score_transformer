@@ -4,7 +4,7 @@ import numpy as np
 pad = '<pad>'
 eos = '<eos>'
 mask = [f'm_{num}' for num in range(1)]
-# ignore = 'ignore'
+ignore = ['ignore']
 special_tokens = [pad, eos]
 
 time_signature_token = ['4/4', '3/4', '2/4', '6/8']
@@ -25,12 +25,22 @@ all_key_names = ['C major', 'G major', 'D major', 'A major',
                  'C minor', 'F minor', 'B- minor', 'E- minor',
                  ]
 
+all_major_names = np.array(['C major', 'D- major', 'D major', 'E- major',
+                   'E major', 'F major', 'G- major', 'G major',
+                   'A- major', 'A major', 'B- major', 'B major'])
+
+all_minor_names = np.array(['A minor', 'B- minor', 'B minor', 'C minor',
+                   'C# minor', 'D minor', 'E- minor', 'E minor',
+                   'F minor', 'F# minor', 'G minor', 'G# minor'])
+
+
 key_token = [f'k_{num}' for num in range(len(all_key_names))]
 key_to_token = {name: f'k_{i}' for i, name in enumerate(all_key_names)}
 token_to_key = {v: k for k, v in key_to_token.items()}
 
+song_token = time_signature_token + tempo_token + key_token
 header_token = time_signature_token + tempo_token + program_num + key_token
-
+header_without_key_token = time_signature_token + tempo_token + program_num
 track_note_density_token = [f'd_{num}' for num in range(10)]
 track_occupation_rate_token = [f'o_{num}' for num in range(10)]
 track_polyphony_rate_token = [f'y_{num}' for num in range(10)]
@@ -47,27 +57,31 @@ diameter_token = [f'a_{num}' for num in range(12)]
 bar_control_tokens = tensile_strain_token + diameter_token
 head_control_tokens = track_control_tokens + header_token
 control_tokens = bar_control_tokens + track_control_tokens
-all_meta_tokens = bar_control_tokens + head_control_tokens
+all_meta_tokens = bar_control_tokens + head_control_tokens + program_num
 
 
 rests = ['rest_e', 'rest_s']
 
 durations = ['whole', 'half', 'quarter', 'eighth', 'sixteenth']
 
-pitches = [f'p_{num}' for num in range(21, 109)] + rests + ['continue']
+
+pitch_tokens = [f'p_{num}' for num in range(21, 109)]
+pitches = pitch_tokens + rests + ['continue']
 
 note_tokens = pitches + durations
 
 all_tokens = special_tokens + mask + structure_token + \
              header_token + track_control_tokens + bar_control_tokens + \
-             note_tokens
+             note_tokens + ignore
 
 control_bins = np.arange(0, 1, 0.1)
 # tensile_bins = np.arange(0, 2, 0.1).tolist() + np.arange(2, 2.8, 0.2).tolist() + [4]
 tensile_bins = np.arange(0, 2.1, 0.2).tolist() + [4]
 # diameter_bins = np.arange(0, 4.8, 0.2).tolist() + [5]
 diameter_bins = np.arange(0, 4.1, 0.4).tolist() + [5]
-tempo_bins = np.array([0] + list(range(60, 190, 30)) + [1000])
+tempo_bins = np.array([0] + list(range(60, 190, 30)) + [200])
+tension_bin = np.arange(0,6.5,0.5)
+tension_bin[-1] = 6.5
 
 
 class WordVocab(object):
@@ -92,6 +106,7 @@ class WordVocab(object):
         self.structure_indices = [self._char2idx[name] for name in structure_token]
         self.pitch_indices = [self._char2idx[name] for name in pitches]
         self.mask_indices = [self._char2idx[name] for name in mask]
+        self.ignore_indices = [self._char2idx[name] for name in ignore]
         self.duration_indices = [self._char2idx[name] for name in durations + rests]
         self.key_indices = [self._char2idx[name] for name in key_token]
         self.density_indices = [self._char2idx[name] for name in track_note_density_token]

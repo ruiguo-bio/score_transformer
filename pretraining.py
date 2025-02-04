@@ -7,6 +7,8 @@ import argparse
 import os
 
 import logging
+
+from log import logger
 import coloredlogs
 import pickle
 
@@ -187,7 +189,7 @@ def main(**kwargs):
               'd_model': 512,
               'lr':lr,
               'lr_reset': args.reset_lr,
-              'num_encoder_layers': 8,
+              'num_encoder_layers': 4,
               'ce_loss_only': is_ce_only,
               'distance': distance,
               'epochs':num_epochs,
@@ -393,11 +395,25 @@ def run(config, checkpoint_dir=None,run_id=None):
         # access all HPs through wandb.config, so logging matches execution!
         config = wandb.config
         current_folder = wandb.run.dir
+        logfile = current_folder + '/logging.log'
         if resume:
-            logger = logging_config(current_folder,True)
-            logger.info('resume previous unfinished task')
+            filemode = 'a'
         else:
-            logger = logging_config(current_folder)
+            filemode = 'w'
+        logger.handlers = []
+        logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.DEBUG,
+                            datefmt='%Y-%m-%d %H:%M:%S', filename=logfile, filemode=filemode)
+
+        console = logging.StreamHandler()
+        console.setLevel(logging.INFO)
+        # set a format which is simpler for console use
+        formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(message)s',
+                                      datefmt='%Y-%m-%d %H:%M:%S')
+        console.setFormatter(formatter)
+        logger.addHandler(console)
+
+        coloredlogs.install(level='INFO', logger=logger, isatty=False)
+
         vocab = WordVocab(all_tokens)
 
         for key in config.keys():
@@ -439,7 +455,7 @@ def run(config, checkpoint_dir=None,run_id=None):
                 name = k[7:] # remove `module.`
                 new_state_dict[name] = v
 
-            new_state_dict = model_state
+            # new_state_dict = model_state
 
             model.load_state_dict(new_state_dict)
 
@@ -465,21 +481,21 @@ def run(config, checkpoint_dir=None,run_id=None):
         window_size = int(16 / 2)
 
         if platform == 'local':
-            folder_prefix = '/home/ruiguo/'
+            folder_prefix = '/home/data/guorui/'
         else:
             folder_prefix = '/content/drive/MyDrive/'
 
         if is_debug:
-            train_batch_name = 'test_batches_0_0_1'
-            train_length_name = 'test_batch_lengths_0_0_1'
-            valid_batch_name = 'valid_batches_0_0_1'
-            valid_batch_length_name = 'valid_batch_lengths_0_0_1'
+            train_batch_name = 'validation_batches'
+            train_length_name = 'validation_batch_length'
+            valid_batch_name = 'test_batches'
+            valid_batch_length_name = 'test_batch_length'
 
         else:
-            train_batch_name = 'train_batches_0_8'
-            train_length_name = 'train_batch_lengths_0_8'
-            valid_batch_name = 'valid_batches_0_0_8'
-            valid_batch_length_name = 'valid_batch_lengths_0_0_8'
+            train_batch_name = 'training_all_batches_2'
+            train_length_name = 'training_batch_length_2'
+            valid_batch_name = 'validation_batches'
+            valid_batch_length_name = 'validation_batch_length'
 
         train_batches = pickle.load(open(folder_prefix + 'score_transformer/sync/' + train_batch_name, 'rb'))
         train_batch_lengths = pickle.load(open(folder_prefix + 'score_transformer/sync/' + train_length_name, 'rb'))
@@ -502,7 +518,7 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 '',
                                                 vocab,
                                                 0, 0,
-                                                2400,
+                                                2200,
                                                 window_size,
                                                 train_batches,
                                                 train_batch_lengths,
@@ -511,11 +527,13 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 .3,
                                                 .3,
                                                 .3,
-                                                .5,
-                                                .3,
-                                                3,
-                                                0.5,
-                                                span_ratio_separately_each_epoch,
+                                                control_mask_ratio=.5,
+                                                header_mask_ratio=.3,
+                                                ignore_ratio=0.05,
+                                                span_lengths=3,
+                                                span_ratio_jointly=0.5,
+                                                span_ratio_separately_each_epoch=span_ratio_separately_each_epoch,
+                                                logger=logger,
                                                 mask_bar_num_ratio=0,
                                                 mask_track_num_ratio=0,
                                                 mask_bar_ctrl_token=False,
@@ -526,7 +544,7 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 '',
                                                 vocab, 0,
                                                 0,
-                                                2400,
+                                                2200,
                                                 window_size,
                                                 valid_batches,
                                                 valid_batch_lengths,
@@ -535,11 +553,13 @@ def run(config, checkpoint_dir=None,run_id=None):
                                                 .3,
                                                 .3,
                                                 .3,
-                                                .5,
-                                                .3,
-                                                3,
-                                                0.5,
-                                                span_ratio_separately_each_epoch,
+                                                control_mask_ratio=.5,
+                                                header_mask_ratio=.3,
+                                                ignore_ratio=0.05,
+                                                span_lengths=3,
+                                                span_ratio_jointly=0.5,
+                                                span_ratio_separately_each_epoch=span_ratio_separately_each_epoch,
+                                                logger=logger,
                                                 mask_bar_num_ratio=0,
                                                 mask_track_num_ratio=0,
                                                 mask_bar_ctrl_token=False,
@@ -654,15 +674,15 @@ def run(config, checkpoint_dir=None,run_id=None):
             polyphony_loss = nn.CrossEntropyLoss(ignore_index=0, weight=polyphony_weight, reduction='none')
 
             pitch_register_weight = torch.zeros(vocab.vocab_size, device=device)
-            pitch_register_weight[200:210] = 1
+            pitch_register_weight[200:208] = 1
             pitch_register_loss = nn.CrossEntropyLoss(ignore_index=0, weight=pitch_register_weight, reduction='none')
 
             tensile_weight = torch.zeros(vocab.vocab_size, device=device)
-            tensile_weight[210:222] = 1
+            tensile_weight[208:220] = 1
             tensile_loss = nn.CrossEntropyLoss(ignore_index=0, weight=tensile_weight, reduction='none')
 
             diameter_weight = torch.zeros(vocab.vocab_size, device=device)
-            diameter_weight[222:234] = 1
+            diameter_weight[220:232] = 1
             diameter_loss = nn.CrossEntropyLoss(ignore_index=0, weight=diameter_weight, reduction='none')
 
         else:
@@ -714,7 +734,7 @@ def run(config, checkpoint_dir=None,run_id=None):
         for epoch in range(start_epoch,config.epochs):
 
             # after fourth epoch the eos weight is set to 1
-            if epoch == 3:
+            if epoch >= 3:
                 ce_weight[1] = 1
                 ce_loss = nn.CrossEntropyLoss(ignore_index=0, weight=ce_weight,reduction='none')
                 ce_weight_all[1] = 1
@@ -734,17 +754,16 @@ def run(config, checkpoint_dir=None,run_id=None):
 
                     polyphony_weight[190:200] = config['control_token_weight']
 
-                    pitch_register_weight[200:210] = config['control_token_weight']
+                    pitch_register_weight[200:208] = config['control_token_weight']
 
 
-                    tensile_weight[210:222] = config['control_token_weight']
+                    tensile_weight[208:220] = config['control_token_weight']
 
-                    diameter_weight[222:234] = config['control_token_weight']
+                    diameter_weight[220:232] = config['control_token_weight']
 
-                    ce_weight_all[7:234] = config['control_token_weight']
+                    ce_weight_all[7:232] = config['control_token_weight']
 
 
-            # pbar = tqdm(total=print_every, leave=False)
 
             every_print_accuracy = {'total': 0,
                                     'track_control': 0,
@@ -856,6 +875,7 @@ def run(config, checkpoint_dir=None,run_id=None):
 
                 # pbar.update(1)
                 if step % print_every == print_every - 1:
+
                     log_step += 1
                     # if step % learning_rate_adjust_interval == learning_rate_adjust_interval - 1:
                     #     scheduler_optim.step(total_loss / print_every)
@@ -897,7 +917,7 @@ def run(config, checkpoint_dir=None,run_id=None):
                                         total accuracy: {every_print_accuracy["total"] / times} \n \
                                         ce loss: {ce_losses / print_every} \n \
                                         time signature loss: {time_signature_losses / print_every} \n \
-                                         program loss : {program_losses / print_every} \n \
+                                        program loss : {program_losses / print_every} \n \
                                         key loss: {key_losses / print_every}\n \
                                         tempo loss: {tempo_losses / print_every} \n \
                                         density loss : {density_losses / print_every} \n \
@@ -1001,44 +1021,8 @@ def run(config, checkpoint_dir=None,run_id=None):
                         'epoch': epoch,
                         'loss': val_loss['total']}, path)
 
-            # tune.report(train_loss=average_train_loss,
-            #             train_accuracy=train_accuracies['total'],
-            #             lr=lr,
-            #             loss=val_loss,
-            #             val_loss=val_loss,
-            #             val_accuracy=val_accuracy['total'],
-            #             pitch_accuracy=val_accuracy['pitch'],
-            #             duration_accuracy=val_accuracy['duration'],
-            #             structure_accuracy=val_accuracy['structure'],
-            #             tempo_accuracy=val_accuracy['tempo'],
-            #             time_signature_accuracy=val_accuracy['time_signature'],
-            #             program_accuracy=val_accuracy['program'],
-            #             eos_accuracy=val_accuracy['eos'],
-            #             track_control_accuracy=val_accuracy['track_control'],
-            #             bar_control_accuracy=val_accuracy['bar_control'],
-            #             density_accuracy=val_accuracy['density'],
-            #             occupation_accuracy=val_accuracy['occupation'],
-            #             polyphony_accuracy=val_accuracy['polyphony'],
-            #             pitch_register_accuracy=val_accuracy['pitch_register'],
-            #             tensile_accuracy=val_accuracy['tensile'],
-            #             diameter_accuracy=val_accuracy['diameter'],
-            #             key_accuracy=val_accuracy['key'],
-            #             )
-
         logger.info("Finished Training")
-        del train_dataset
-        del train_batches
-        del valid_dataset
-        del valid_batches
-        del train_batch_lengths
-        del valid_batch_lengths
-        del train_data_loader
-        del valid_data_loader
 
-        # train_losses, valid_losses = train(train_data_loader, valid_data_loader, model, device, optim, criterion,
-        #                                    config['num_epochs'], vocab)
-        # logger.info(f'training losses is {train_losses[-1]}'
-        #       f'validation losses is {valid_losses[-1]}')
 
 
 def accuracy(outputs, targets, vocab):

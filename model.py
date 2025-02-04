@@ -5,6 +5,54 @@ import torch
 from torch import nn
 import transformer
 
+class Classify_transformer(nn.Module):
+    def __init__(self, vocab_size, d_model, nhead, num_encoder_layers, dim_feedforward,
+                 max_seq_length, pos_dropout):
+        super().__init__()
+        self.d_model = d_model
+        self.embedding = nn.Embedding(vocab_size, d_model)
+
+        self.pos_enc = PositionalEncoding(d_model, pos_dropout, max_seq_length)
+
+        # self.transformer = nn.Transformer(d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, trans_dropout)
+        self.transformer = transformer.Classifier(d_model, nhead, num_encoder_layers,
+                 dim_feedforward)
+
+
+        self.classify_0 = nn.Linear(d_model, 128)
+        self.classify_1 = nn.Linear(128, 2)
+        self.classify_2 = nn.Linear(128, 2)
+
+        # self.classify_0 = nn.Linear(d_model, 2)
+
+    def forward(self, src):
+        # Reverse the shape of the batches from (num_sentences, num_tokens_in_each_sentence)
+        src = src.permute(1, 0)
+
+
+        # Embed the batches, scale by sqrt(d_model), and add the positional encoding
+        src = self.pos_enc(self.embedding(src) * math.sqrt(self.d_model))
+
+        # Send the batches to the model
+        output = self.transformer(src)
+
+        # Rearrange to batch-first
+        # output = output.permute(1,0,2)
+        output = rearrange(output, 't n e -> n t e')
+        # print("in model, output size", output.size())
+        output = output.mean(dim=1)
+        # print("in model, output size", output.size())
+        output = self.classify_0(output)
+        output1 = self.classify_1(output)
+        output2 = self.classify_2(output)
+        # print("in model, output size", output.size())
+
+        # print("in model, attention weight size", attention_weight.size())
+
+        # Run the output through an fc layer to return values for each token in the vocab
+        return output1,output2
+
+
 class ScoreTransformer(nn.Module):
     def __init__(self, vocab_size, d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, max_seq_length, pos_dropout, trans_dropout):
         """

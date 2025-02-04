@@ -141,6 +141,97 @@ class Transformer(Module):
             if p.dim() > 1:
                 xavier_uniform_(p)
 
+class Classifier(Module):
+    r"""A transformer model. User is able to modify the attributes as needed. The architecture
+    is based on the paper "Attention Is All You Need". Ashish Vaswani, Noam Shazeer,
+    Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and
+    Illia Polosukhin. 2017. Attention is all you need. In Advances in Neural Information
+    Processing Systems, pages 6000-6010. Users can build the BERT(https://arxiv.org/abs/1810.04805)
+    model with corresponding parameters.
+
+    Args:
+        d_model: the number of expected features in the encoder/decoder inputs (default=512).
+        nhead: the number of heads in the multiheadattention models (default=8).
+        num_encoder_layers: the number of sub-encoder-layers in the encoder (default=6).
+        num_decoder_layers: the number of sub-decoder-layers in the decoder (default=6).
+        dim_feedforward: the dimension of the feedforward network model (default=2048).
+        dropout: the dropout value (default=0.1).
+        activation: the activation function of encoder/decoder intermediate layer, relu or gelu (default=relu).
+        custom_encoder: custom encoder (default=None).
+        custom_decoder: custom decoder (default=None).
+
+    Examples::
+        >>> transformer_model = nn.Transformer(nhead=16, num_encoder_layers=12)
+        >>> src = torch.rand((10, 32, 512))
+        >>> tgt = torch.rand((20, 32, 512))
+        >>> out = transformer_model(src, tgt)
+
+    Note: A full example to apply nn.Transformer module for the word language model is available in
+    https://github.com/pytorch/examples/tree/master/word_language_model
+    """
+
+    def __init__(self, d_model: int = 512, nhead: int = 8, num_encoder_layers: int = 6,
+                 dim_feedforward: int = 2048, dropout: float = 0.1,
+                 activation: str = "relu", ) -> None:
+        super(Classifier,self).__init__()
+
+
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
+        encoder_norm = LayerNorm(d_model)
+        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+
+        self.d_model = d_model
+        self.nhead = nhead
+
+
+    def forward(self, src: Tensor) -> Tensor:
+        r"""Take in and process masked source/target sequences.
+
+        Args:
+            src: the sequence to the encoder (required).
+
+        Shape:
+            - src: :math:`(S, N, E)`.
+
+            - output: :math:`(T, N, E)`.
+
+            Note: Due to the multi-head attention architecture in the transformer model,
+            the output sequence length of a transformer is same as the input sequence
+            (i.e. target) length of the decode.
+
+            where S is the source sequence length, T is the target sequence length, N is the
+            batch size, E is the feature number
+
+        Examples:
+            >>> output = transformer_model(src, tgt, src_mask=src_mask, tgt_mask=tgt_mask)
+        """
+
+
+        memory = self.encoder(src)
+
+
+        return memory
+
+    def generate_square_subsequent_mask(self, sz: int) -> Tensor:
+        r"""Generate a square mask for the sequence. The masked positions are filled with float('-inf').
+            Unmasked positions are filled with float(0.0).
+        """
+        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
+
+    def _reset_parameters(self):
+        r"""Initiate parameters in the transformer model."""
+
+        for p in self.parameters():
+            if p.dim() > 1:
+                xavier_uniform_(p)
+
+
+
+
+
+
 
 class TransformerEncoder(Module):
     r"""TransformerEncoder is a stack of N encoder layers
